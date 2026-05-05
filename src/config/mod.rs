@@ -42,6 +42,10 @@ pub struct Settings {
     pub last_model: Option<String>,
     pub preferred_mode: AgentMode,
     pub ollama_api_key: Option<String>,
+    /// Timeout in seconds for Ollama requests (default: 5)
+    pub ollama_timeout_secs: u64,
+    /// Maximum number of retries for Ollama requests (default: 3)
+    pub ollama_max_retries: u32,
 }
 
 impl Default for Settings {
@@ -51,6 +55,8 @@ impl Default for Settings {
             last_model: None,
             preferred_mode: AgentMode::Casual,
             ollama_api_key: None,
+            ollama_timeout_secs: 5,
+            ollama_max_retries: 3,
         }
     }
 }

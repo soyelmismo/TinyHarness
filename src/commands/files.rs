@@ -2,7 +2,7 @@ use crate::provider::{Message, Role};
 use crate::style::*;
 
 /// Manages pinned files whose content is injected into the system prompt context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FileContext {
     /// Ordered list of (path, content) pairs for pinned files.
     pinned_files: Vec<(String, String)>,
@@ -10,9 +10,7 @@ pub struct FileContext {
 
 impl FileContext {
     pub fn new() -> Self {
-        FileContext {
-            pinned_files: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Add a file to the pinned context. Returns an error message if the file cannot be read.
@@ -45,24 +43,22 @@ impl FileContext {
 
         if self.pinned_files.len() == original_len {
             // Maybe it was a partial match — try basename
-            let path_basename = std::path::Path::new(path)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string());
-
-            if let Some(basename) = path_basename {
-                if let Some(idx) = self.pinned_files.iter().position(|(p, _)| {
+            let path_basename = std::path::Path::new(path).file_name().and_then(|f| {
+                self.pinned_files.iter().position(|(p, _)| {
                     std::path::Path::new(p)
                         .file_name()
-                        .map(|f| f.to_string_lossy().to_string())
-                        == Some(basename.clone())
-                }) {
-                    self.pinned_files.remove(idx);
-                    return Ok(format!(
-                        "Unpinned '{}' (matched by basename). Total pinned files: {}",
-                        path,
-                        self.pinned_files.len()
-                    ));
-                }
+                        .map(|pf| pf.to_string_lossy().to_string())
+                        == Some(f.to_string_lossy().to_string())
+                })
+            });
+
+            if let Some(idx) = path_basename {
+                self.pinned_files.remove(idx);
+                return Ok(format!(
+                    "Unpinned '{}' (matched by basename). Total pinned files: {}",
+                    path,
+                    self.pinned_files.len()
+                ));
             }
 
             return Err(format!(
@@ -155,9 +151,9 @@ impl FileContext {
         }
 
         let mut sections = Vec::new();
-        sections.push(format!(
-            "\nThe following files are pinned in context (available without reading):"
-        ));
+        sections.push(
+            "\nThe following files are pinned in context (available without reading):".to_string(),
+        );
 
         for (path, content) in &self.pinned_files {
             let line_count = content.lines().count();
@@ -206,7 +202,7 @@ pub fn execute_refresh(file_context: &mut FileContext) {
 
 /// Inject pinned file content into the system prompt message.
 /// This modifies the system prompt in-place to include pinned file content.
-pub fn inject_into_system_prompt(messages: &mut Vec<Message>, file_context: &FileContext) {
+pub fn inject_into_system_prompt(messages: &mut [Message], file_context: &FileContext) {
     if file_context.is_empty() {
         return;
     }

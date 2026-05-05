@@ -86,7 +86,7 @@ impl CommandDispatcher {
     /// Update the system prompt message in the conversation to reflect the current
     /// mode, workspace context, and pinned files. Call this after any change that
     /// affects the system prompt content (mode switch, add/drop/refresh files, etc.).
-    pub fn refresh_system_prompt(&self, messages: &mut Vec<Message>) {
+    pub fn refresh_system_prompt(&self, messages: &mut [Message]) {
         if let Some(sys_msg) = messages.iter_mut().find(|m| m.role == Role::System) {
             sys_msg.content = self.build_system_prompt();
         }
@@ -98,7 +98,7 @@ impl CommandDispatcher {
     pub fn switch_mode(
         &mut self,
         new_mode: AgentMode,
-        messages: &mut Vec<Message>,
+        messages: &mut [Message],
     ) -> Result<(), String> {
         if new_mode == self.current_mode {
             return Err(format!("Already in '{}' mode", new_mode));

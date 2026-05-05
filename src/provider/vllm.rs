@@ -14,14 +14,14 @@ impl VllmProvider {
             inner: OpenAiCompatInner::new(base_url),
         }
     }
-
-    pub async fn health_check(&self) -> Result<(), String> {
-        self.inner.health_check().await
-    }
 }
 
 #[async_trait::async_trait]
 impl Provider for VllmProvider {
+    async fn health_check(&self) -> Result<(), String> {
+        self.inner.health_check().await
+    }
+
     async fn list_models(&self) -> Vec<String> {
         self.inner.fetch_model_list().await
     }

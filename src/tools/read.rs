@@ -39,12 +39,10 @@ fn read_partial(path: &str, from: usize, to: usize) -> String {
     let mut content = String::new();
     let mut lines_read = 0usize;
 
-    for line in reader.lines().skip(from).take(to) {
-        if let Ok(line) = line {
-            content.push_str(&line);
-            content.push('\n');
-            lines_read += 1;
-        }
+    for line in reader.lines().skip(from).take(to).flatten() {
+        content.push_str(&line);
+        content.push('\n');
+        lines_read += 1;
     }
 
     if content.is_empty() {

@@ -190,18 +190,17 @@ impl Session {
 
             if let Ok(SessionEntry::Meta(meta)) =
                 serde_json::from_str::<SessionEntry>(first_line.trim())
+                && meta.working_dir == working_dir
             {
-                if meta.working_dir == working_dir {
-                    match &mut best {
-                        Some((best_time, best_id)) => {
-                            if meta.updated_at > *best_time {
-                                *best_time = meta.updated_at;
-                                *best_id = meta.id.clone();
-                            }
+                match &mut best {
+                    Some((best_time, best_id)) => {
+                        if meta.updated_at > *best_time {
+                            *best_time = meta.updated_at;
+                            *best_id = meta.id.clone();
                         }
-                        None => {
-                            best = Some((meta.updated_at, meta.id.clone()));
-                        }
+                    }
+                    None => {
+                        best = Some((meta.updated_at, meta.id.clone()));
                     }
                 }
             }
@@ -269,7 +268,7 @@ impl Session {
         }
 
         // Sort by updated_at descending (most recent first)
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         sessions
     }
 
@@ -349,13 +348,13 @@ impl Session {
         match fs::File::create(&tmp_path) {
             Ok(mut file) => {
                 // Write updated meta as first line
-                if write!(file, "{}\n", meta_line).is_err() {
+                if writeln!(file, "{}", meta_line).is_err() {
                     let _ = fs::remove_file(&tmp_path);
                     return;
                 }
                 // Write remaining lines (skip original first line)
                 for line in lines.iter().skip(1) {
-                    if write!(file, "{}\n", line).is_err() {
+                    if writeln!(file, "{}", line).is_err() {
                         let _ = fs::remove_file(&tmp_path);
                         return;
                     }

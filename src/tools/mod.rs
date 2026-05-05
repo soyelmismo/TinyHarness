@@ -13,13 +13,14 @@ pub mod write;
 use crate::provider::ToolInfo;
 use crate::tools::tool::Tool;
 
+#[derive(Default)]
 pub struct ToolManager {
     tools: Vec<Tool>,
 }
 
 impl ToolManager {
     pub fn new() -> Self {
-        ToolManager { tools: vec![] }
+        Self::default()
     }
 
     /// Register all built-in tools.

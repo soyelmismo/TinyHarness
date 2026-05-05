@@ -66,36 +66,35 @@ fn resolve_provider_kind(args: &Args, settings: &Settings) -> ProviderKind {
     }
 }
 
-/// Create the provider backend, run health checks for non-Ollama providers,
-/// and return it wrapped in Arc<Mutex>.
+/// Create the provider backend, run health checks, and return it wrapped in Arc<Mutex>.
 async fn create_provider(
     kind: ProviderKind,
     url: String,
+    settings: &Settings,
 ) -> Arc<Mutex<dyn Provider + Send + Sync>> {
-    match kind {
-        ProviderKind::LlamaCpp => {
-            let llama = LlamaCppProvider::new(url);
-            if let Err(e) = llama.health_check().await {
-                eprintln!(
-                    "{}Error:{} LlamaCpp health check failed: {}",
-                    BOLD, RESET, e
-                );
-                std::process::exit(1);
-            }
-            Arc::new(Mutex::new(llama)) as Arc<Mutex<dyn Provider + Send + Sync>>
-        }
-        ProviderKind::Vllm => {
-            let vllm = VllmProvider::new(url);
-            if let Err(e) = vllm.health_check().await {
-                eprintln!("{}Error:{} vLLM health check failed: {}", BOLD, RESET, e);
-                std::process::exit(1);
-            }
-            Arc::new(Mutex::new(vllm)) as Arc<Mutex<dyn Provider + Send + Sync>>
-        }
-        ProviderKind::Ollama => {
-            Arc::new(Mutex::new(OllamaProvider::new(url))) as Arc<Mutex<dyn Provider + Send + Sync>>
+    let provider: Arc<Mutex<dyn Provider + Send + Sync>> = match kind {
+        ProviderKind::LlamaCpp => Arc::new(Mutex::new(LlamaCppProvider::new(url))),
+        ProviderKind::Vllm => Arc::new(Mutex::new(VllmProvider::new(url))),
+        ProviderKind::Ollama => Arc::new(Mutex::new(OllamaProvider::new(
+            url,
+            settings.ollama_timeout_secs,
+            settings.ollama_max_retries,
+        ))),
+    };
+
+    // Run health check for all providers (Ollama included)
+    {
+        let p = provider.lock().await;
+        if let Err(e) = p.health_check().await {
+            eprintln!(
+                "{}Error:{} {} health check failed: {}",
+                BOLD, RESET, kind, e
+            );
+            std::process::exit(1);
         }
     }
+
+    provider
 }
 
 /// Auto-select a model on the provider if none is currently set.
@@ -180,7 +179,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         args.url.clone()
     };
 
-    let provider = create_provider(provider_kind, url).await;
+    let provider = create_provider(provider_kind, url, &settings).await;
 
     // Auto-select model if none is currently set
     {

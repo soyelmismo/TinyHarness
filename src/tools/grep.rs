@@ -101,20 +101,45 @@ fn walk_dir(
             walk_dir(&path, regex, include_pattern, results, total_matches)?;
         } else if path.is_file() {
             // Apply include filter if specified
-            if let Some(inc) = include_pattern {
-                if !path.to_string_lossy().contains(inc) {
-                    continue;
-                }
+            if let Some(inc) = include_pattern
+                && !path.to_string_lossy().contains(inc)
+            {
+                continue;
             }
 
             // Skip binary-looking files
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                match ext {
-                    "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "svg" | "woff" | "woff2"
-                    | "ttf" | "eot" | "otf" | "pdf" | "zip" | "tar" | "gz" | "bz2" | "xz"
-                    | "exe" | "dll" | "so" | "dylib" | "wasm" | "o" | "pyc" | "class" => continue,
-                    _ => {}
-                }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                && matches!(
+                    ext,
+                    "png"
+                        | "jpg"
+                        | "jpeg"
+                        | "gif"
+                        | "bmp"
+                        | "ico"
+                        | "svg"
+                        | "woff"
+                        | "woff2"
+                        | "ttf"
+                        | "eot"
+                        | "otf"
+                        | "pdf"
+                        | "zip"
+                        | "tar"
+                        | "gz"
+                        | "bz2"
+                        | "xz"
+                        | "exe"
+                        | "dll"
+                        | "so"
+                        | "dylib"
+                        | "wasm"
+                        | "o"
+                        | "pyc"
+                        | "class"
+                )
+            {
+                continue;
             }
 
             let content = match fs::read_to_string(&path) {

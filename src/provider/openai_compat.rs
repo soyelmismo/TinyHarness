@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,13 @@ pub struct OpenAiCompatInner {
 
 impl OpenAiCompatInner {
     pub fn new(base_url: String) -> Self {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         OpenAiCompatInner {
-            client: Client::new(),
+            client,
             base_url,
             model: None,
         }
@@ -155,6 +161,7 @@ pub struct OpenAIToolCallFunction {
 pub struct ChunkChoice {
     pub delta: Delta,
     #[serde(default)]
+    #[allow(dead_code)]
     pub finish_reason: Option<String>,
 }
 
@@ -280,12 +287,23 @@ pub async fn stream_chat_completions(
 
     let mut acc_tool_calls: HashMap<usize, OpenAIToolCall> = HashMap::new();
     let mut response_content = String::new();
-    let mut finish_reason: Option<String> = None;
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = match chunk_result {
             Ok(c) => c,
-            Err(_) => break,
+            Err(e) => {
+                // Stream read error — surface it rather than silently breaking
+                let _ = send
+                    .send(ChatMessageResponse {
+                        message: ChatMessage {
+                            content: format!("\n\nStream error: {}", e),
+                            tool_calls: vec![],
+                        },
+                        done: false,
+                    })
+                    .await;
+                break;
+            }
         };
 
         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -301,36 +319,31 @@ pub async fn stream_chat_completions(
                         continue;
                     }
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                            for choice in chunk.choices {
-                                if let Some(ref reason) = choice.finish_reason {
-                                    finish_reason = Some(reason.clone());
-                                }
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(chunk) = serde_json::from_str::<StreamChunk>(data)
+                    {
+                        for choice in chunk.choices {
+                            if let Some(content) = &choice.delta.content {
+                                response_content.push_str(content);
+                            }
 
-                                if let Some(content) = &choice.delta.content {
-                                    response_content.push_str(content);
-                                }
+                            if let Some(tool_calls) = &choice.delta.tool_calls {
+                                for tc in tool_calls {
+                                    let entry =
+                                        acc_tool_calls.entry(tc.index).or_insert(OpenAIToolCall {
+                                            index: tc.index,
+                                            id: String::new(),
+                                            call_type: "function".to_string(),
+                                            function: OpenAIToolCallFunction::default(),
+                                        });
 
-                                if let Some(tool_calls) = &choice.delta.tool_calls {
-                                    for tc in tool_calls {
-                                        let entry = acc_tool_calls.entry(tc.index).or_insert(
-                                            OpenAIToolCall {
-                                                index: tc.index,
-                                                id: String::new(),
-                                                call_type: "function".to_string(),
-                                                function: OpenAIToolCallFunction::default(),
-                                            },
-                                        );
-
-                                        if !tc.id.is_empty() {
-                                            entry.id = tc.id.clone();
-                                        }
-                                        if !tc.function.name.is_empty() {
-                                            entry.function.name = tc.function.name.clone();
-                                        }
-                                        entry.function.arguments.push_str(&tc.function.arguments);
+                                    if !tc.id.is_empty() {
+                                        entry.id = tc.id.clone();
                                     }
+                                    if !tc.function.name.is_empty() {
+                                        entry.function.name = tc.function.name.clone();
+                                    }
+                                    entry.function.arguments.push_str(&tc.function.arguments);
                                 }
                             }
                         }
@@ -353,7 +366,7 @@ pub async fn stream_chat_completions(
         }
     }
 
-    let tool_calls: Vec<ToolCall> = if finish_reason.as_deref() == Some("tool_calls") {
+    let tool_calls: Vec<ToolCall> = if !acc_tool_calls.is_empty() {
         acc_tool_calls
             .into_values()
             .map(|tc| {

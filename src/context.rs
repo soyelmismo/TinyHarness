@@ -136,15 +136,17 @@ fn detect_project_name(root: &Path, project_type: &str) -> String {
             if let Ok(content) = fs::read_to_string(root.join("Cargo.toml")) {
                 for line in content.lines() {
                     let trimmed = line.trim();
-                    if let Some(name) = trimmed.strip_prefix("name = \"") {
-                        if let Some(end) = name.find('"') {
-                            return name[..end].to_string();
-                        }
+                    if let Some(name) = trimmed
+                        .strip_prefix("name = \"")
+                        .and_then(|n| n.find('"').map(|end| &n[..end]))
+                    {
+                        return name.to_string();
                     }
-                    if let Some(name) = trimmed.strip_prefix("name = '") {
-                        if let Some(end) = name.find('\'') {
-                            return name[..end].to_string();
-                        }
+                    if let Some(name) = trimmed
+                        .strip_prefix("name = '")
+                        .and_then(|n| n.find('\'').map(|end| &n[..end]))
+                    {
+                        return name.to_string();
                     }
                 }
             }
@@ -153,12 +155,11 @@ fn detect_project_name(root: &Path, project_type: &str) -> String {
                 .unwrap_or_else(|| "Unknown".to_string())
         }
         "Node.js" => {
-            if let Ok(content) = fs::read_to_string(root.join("package.json")) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(name) = json.get("name").and_then(|n| n.as_str()) {
-                        return name.to_string();
-                    }
-                }
+            if let Ok(content) = fs::read_to_string(root.join("package.json"))
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(name) = json.get("name").and_then(|n| n.as_str())
+            {
+                return name.to_string();
             }
             root.file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -241,11 +242,11 @@ fn discover_project_md(start_dir: &Path) -> Option<(String, String)> {
     loop {
         for &filename in PROJECT_MD_FILE_NAMES {
             let candidate = dir.join(filename);
-            if candidate.is_file() {
-                if let Ok(content) = fs::read_to_string(&candidate) {
-                    let truncated = truncate_content(&content, filename);
-                    return Some((filename.to_string(), truncated));
-                }
+            if candidate.is_file()
+                && let Ok(content) = fs::read_to_string(&candidate)
+            {
+                let truncated = truncate_content(&content, filename);
+                return Some((filename.to_string(), truncated));
             }
         }
 

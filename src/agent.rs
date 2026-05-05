@@ -29,10 +29,11 @@ pub async fn run_agent_loop(
     let (send, mut recv) = mpsc::channel::<ChatMessageResponse>(1024);
 
     let mut stdout = io::stdout();
-    stdout.write("╔════════════════════════════════════════════════════════╗\n".as_bytes())?;
-    stdout.write("║           TinyHarness AI Assistant                     ║\n".as_bytes())?;
-    stdout.write("╚════════════════════════════════════════════════════════╝\n\n".as_bytes())?;
-    stdout.write(
+    stdout.write_all("╔════════════════════════════════════════════════════════╗\n".as_bytes())?;
+    stdout.write_all("║           TinyHarness AI Assistant                     ║\n".as_bytes())?;
+    stdout
+        .write_all("╚════════════════════════════════════════════════════════╝\n\n".as_bytes())?;
+    stdout.write_all(
         format!(
             "{}Tip:{} Type {} to see available commands\n\n",
             GRAY, RESET, "/help"
@@ -81,8 +82,8 @@ pub async fn run_agent_loop(
                 trimmed
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
-                stdout.write("\n".as_bytes())?;
-                stdout.write(
+                stdout.write_all("\n".as_bytes())?;
+                stdout.write_all(
                     format!(
                         "{}Use {}/exit{} or {}{}Ctrl+D{} to exit.\n",
                         GRAY, BLUE, GRAY, GRAY, BOLD, RESET
@@ -93,7 +94,7 @@ pub async fn run_agent_loop(
                 continue;
             }
             Err(rustyline::error::ReadlineError::Eof) => {
-                stdout.write("\n".as_bytes())?;
+                stdout.write_all("\n".as_bytes())?;
                 break;
             }
             Err(err) => {
@@ -137,7 +138,7 @@ pub async fn run_agent_loop(
                                             // Ensure system prompt reflects current context
                                             dispatcher.refresh_system_prompt(messages);
                                             // Print loaded conversation history
-                                            print_conversation_history(&messages, &mut stdout)?;
+                                            print_conversation_history(messages, &mut stdout)?;
                                         }
                                         Err(e) => {
                                             eprintln!("{}{}{}", RED, e, RESET);
@@ -203,7 +204,7 @@ pub async fn run_agent_loop(
         session.append_message(messages.last().unwrap());
 
         // Drain any leftover messages in the channel
-        while let Ok(_) = recv.try_recv() {}
+        while recv.try_recv().is_ok() {}
 
         // auto_accept persists across all agent iterations within this user turn,
         // so that pressing 'a' once auto-accepts all subsequent tool calls.
@@ -232,7 +233,7 @@ pub async fn run_agent_loop(
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut received_done = false;
 
-            stdout.write(ORANGE.as_bytes())?;
+            stdout.write_all(ORANGE.as_bytes())?;
 
             while let Some(msg) = recv.recv().await {
                 if !msg.message.tool_calls.is_empty() {
@@ -245,7 +246,7 @@ pub async fn run_agent_loop(
 
                 if !msg.message.content.is_empty() {
                     response_content.push_str(&msg.message.content);
-                    stdout.write(format!("{}", msg.message.content).as_bytes())?;
+                    stdout.write_all(msg.message.content.as_bytes())?;
                     stdout.flush()?;
                 }
 
@@ -255,8 +256,8 @@ pub async fn run_agent_loop(
             }
 
             if !received_done {
-                stdout.write(RESET.as_bytes())?;
-                stdout.write(
+                stdout.write_all(RESET.as_bytes())?;
+                stdout.write_all(
                     format!(
                         "{}Error:{} Provider request failed or was interrupted.\n",
                         RED, RESET
@@ -267,7 +268,7 @@ pub async fn run_agent_loop(
                 break;
             }
 
-            stdout.write(RESET.as_bytes())?;
+            stdout.write_all(RESET.as_bytes())?;
 
             if handle_tool_calls(
                 &tool_calls,
@@ -292,7 +293,7 @@ pub async fn run_agent_loop(
             session.append_message(messages.last().unwrap());
 
             // Warn if conversation is getting long
-            if messages.len() > 30 && messages.len() % 10 == 0 {
+            if messages.len() > 30 && messages.len().is_multiple_of(10) {
                 writeln!(
                     stdout,
                     "\n{}{}⚠ Context is getting large ({} messages). Consider using {}/compact{} to summarize.{}",
@@ -308,7 +309,7 @@ pub async fn run_agent_loop(
             break;
         }
 
-        stdout.write("\n".as_bytes())?;
+        stdout.write_all("\n".as_bytes())?;
         stdout.flush()?;
     }
 
@@ -318,6 +319,7 @@ pub async fn run_agent_loop(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_tool_calls<W: Write>(
     tool_calls: &[ToolCall],
     response_content: &str,
@@ -401,15 +403,15 @@ fn confirm_tool_call<W: Write>(
     if *auto_accept && call.function.name != "run" {
         writeln!(
             stdout,
-            "  {}{} {}{} (auto-accepted)",
-            DIM, "▶", call.function.name, RESET
+            "  {}▶ {}{} (auto-accepted)",
+            DIM, call.function.name, RESET
         )?;
         return Ok(true);
     }
 
     match prompt_tool_confirmation(stdout, call)? {
         Confirmation::No => {
-            stdout.write(format!("  {}Skipped{}{}\n", ORANGE, RESET, BOLD).as_bytes())?;
+            stdout.write_all(format!("  {}Skipped{}{}\n", ORANGE, RESET, BOLD).as_bytes())?;
             stdout.flush()?;
             Ok(false)
         }
@@ -436,29 +438,42 @@ async fn execute_generic_tool<W: Write>(
     stdout: &mut W,
 ) {
     stdout
-        .write(format!("  {}▶{} Executing {}...\n", CYAN, RESET, call.function.name).as_bytes())
+        .write_all(
+            format!(
+                "  {}▶ {}{} Executing {}...\n",
+                CYAN, RESET, call.function.name, RESET
+            )
+            .as_bytes(),
+        )
         .unwrap();
     stdout.flush().unwrap();
     let result = tool_manager
         .execute_tool_call(&call.function.name, &call.function.arguments)
         .await;
 
-    // For the "read" tool, only display the summary line (first line) to avoid
-    // dumping large file contents to the terminal. The full content is still
-    // sent to the LLM in the message below.
-    if call.function.name == "read" {
-        let summary = result.lines().next().unwrap_or("(empty result)");
-        writeln!(stdout, "    {}", summary).unwrap();
-    } else {
-        // Display the full result, multiline, with lines wrapped at word boundaries
-        crate::ui::wrap::write_wrapped_lines(
-            stdout,
-            &result,
-            "    ",
-            "      ",
-            crate::ui::wrap::MAX_LINE_WIDTH,
-        )
-        .unwrap();
+    // For tools that return potentially large listings, show only a summary
+    // line to keep the terminal clean. The full content is still sent to the
+    // LLM in the message below.
+    match call.function.name.as_str() {
+        "read" => {
+            let summary = result.lines().next().unwrap_or("(empty result)");
+            writeln!(stdout, "    {}", summary).unwrap();
+        }
+        "ls" | "grep" | "glob" => {
+            let summary = summarize_listing_result(&result, &call.function.name);
+            writeln!(stdout, "    {}", summary).unwrap();
+        }
+        _ => {
+            // Display the full result, multiline, with lines wrapped at word boundaries
+            crate::ui::wrap::write_wrapped_lines(
+                stdout,
+                &result,
+                "    ",
+                "      ",
+                crate::ui::wrap::MAX_LINE_WIDTH,
+            )
+            .unwrap();
+        }
     }
     stdout.flush().unwrap();
     messages.push(Message {
@@ -694,7 +709,7 @@ fn print_conversation_history<W: Write>(
             Role::Assistant => {
                 if !msg.content.is_empty() {
                     write!(stdout, "{}", ORANGE)?;
-                    stdout.write(msg.content.as_bytes())?;
+                    stdout.write_all(msg.content.as_bytes())?;
                     writeln!(stdout, "{}", RESET)?;
                 }
                 if !msg.tool_calls.is_empty() {
@@ -711,8 +726,8 @@ fn print_conversation_history<W: Write>(
                 // Find the tool name embedded in the content (format: "Tool '<name>' result:\n...")
                 let tool_name = msg.content.split('\'').nth(1).unwrap_or("tool");
 
-                // For the "read" tool, only display the summary line to avoid
-                // dumping large file contents during conversation replay.
+                // For tools that return potentially large listings, only display a summary
+                // to avoid dumping large output during conversation replay.
                 if tool_name == "read" {
                     // The read tool result format is:
                     //   Tool 'read' result:\nRead 'path' (N lines)\n<full content>
@@ -726,6 +741,17 @@ fn print_conversation_history<W: Write>(
                         })
                         .unwrap_or(&msg.content);
                     let summary = result_body.lines().next().unwrap_or("(empty result)");
+                    writeln!(stdout, "    {}", summary)?;
+                } else if tool_name == "ls" || tool_name == "grep" || tool_name == "glob" {
+                    let result_body = msg
+                        .content
+                        .strip_prefix(&format!("Tool '{}' result:\n", tool_name))
+                        .or_else(|| {
+                            msg.content
+                                .strip_prefix(&format!("Tool '{}' result:\n", tool_name))
+                        })
+                        .unwrap_or(&msg.content);
+                    let summary = summarize_listing_result(result_body, tool_name);
                     writeln!(stdout, "    {}", summary)?;
                 } else {
                     let result_body = msg
@@ -754,6 +780,41 @@ fn print_conversation_history<W: Write>(
     Ok(())
 }
 
+/// Produce a one-line summary for listing tools (ls, grep, glob) so the
+/// terminal isn't flooded with potentially large output. Error and empty
+/// messages are passed through verbatim; otherwise the count of result lines
+/// is shown along with the first few entries as a preview.
+fn summarize_listing_result(result: &str, tool_name: &str) -> String {
+    // Pass through error messages and empty-result messages as-is.
+    if result.starts_with("Error:") || result.starts_with("No ") || result == "Directory is empty" {
+        return result.to_string();
+    }
+
+    let lines: Vec<&str> = result.lines().collect();
+    let count = lines.len();
+    let label = match tool_name {
+        "ls" => "entries",
+        "grep" => "matches",
+        "glob" => "files",
+        _ => "results",
+    };
+
+    // Show a preview of the first few entries alongside the total count.
+    const PREVIEW: usize = 3;
+    if count <= PREVIEW {
+        format!("{} {} — {}", count, label, result)
+    } else {
+        let preview: Vec<&str> = lines.iter().take(PREVIEW).copied().collect();
+        format!(
+            "{} {} — {} ... ({} more)",
+            count,
+            label,
+            preview.join(", "),
+            count - PREVIEW
+        )
+    }
+}
+
 /// Format tool call arguments as a compact single-line summary.
 fn format_args_summary(arguments: &serde_json::Value) -> String {
     match arguments {
@@ -777,5 +838,76 @@ fn format_args_summary(arguments: &serde_json::Value) -> String {
             parts.join(", ")
         }
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_summarize_ls_error_passthrough() {
+        let result = summarize_listing_result("Error: Path '/nope' does not exist", "ls");
+        assert_eq!(result, "Error: Path '/nope' does not exist");
+    }
+
+    #[test]
+    fn test_summarize_ls_empty_dir() {
+        let result = summarize_listing_result("Directory is empty", "ls");
+        assert_eq!(result, "Directory is empty");
+    }
+
+    #[test]
+    fn test_summarize_ls_no_matches() {
+        let result = summarize_listing_result("No matches found for pattern 'xyz'", "grep");
+        assert_eq!(result, "No matches found for pattern 'xyz'");
+    }
+
+    #[test]
+    fn test_summarize_ls_few_entries() {
+        let result = summarize_listing_result("Cargo.toml\nCargo.lock\nsrc", "ls");
+        assert_eq!(result, "3 entries — Cargo.toml\nCargo.lock\nsrc");
+    }
+
+    #[test]
+    fn test_summarize_ls_many_entries() {
+        let entries: Vec<String> = (0..10).map(|i| format!("file{i}")).collect();
+        let input = entries.join("\n");
+        let result = summarize_listing_result(&input, "ls");
+        assert_eq!(result, "10 entries — file0, file1, file2 ... (7 more)");
+    }
+
+    #[test]
+    fn test_summarize_grep_many_matches() {
+        let matches: Vec<String> = (1..=5).map(|i| format!("src/main.rs:{}:foo", i)).collect();
+        let input = matches.join("\n");
+        let result = summarize_listing_result(&input, "grep");
+        assert_eq!(
+            result,
+            "5 matches — src/main.rs:1:foo, src/main.rs:2:foo, src/main.rs:3:foo ... (2 more)"
+        );
+    }
+
+    #[test]
+    fn test_summarize_glob_no_files() {
+        let result = summarize_listing_result("No files found matching pattern '*.xyz'", "glob");
+        assert_eq!(result, "No files found matching pattern '*.xyz'");
+    }
+
+    #[test]
+    fn test_summarize_glob_many_files() {
+        let files: Vec<String> = (0..6).map(|i| format!("src/file{i}.rs")).collect();
+        let input = files.join("\n");
+        let result = summarize_listing_result(&input, "glob");
+        assert_eq!(
+            result,
+            "6 files — src/file0.rs, src/file1.rs, src/file2.rs ... (3 more)"
+        );
+    }
+
+    #[test]
+    fn test_summarize_single_entry() {
+        let result = summarize_listing_result("Cargo.toml", "ls");
+        assert_eq!(result, "1 entries — Cargo.toml");
     }
 }

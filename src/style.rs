@@ -1,4 +1,4 @@
-/// ANSI escape codes for terminal styling.
+// ANSI escape codes for terminal styling.
 
 // Style modifiers
 pub const RESET: &str = "\x1b[0m";

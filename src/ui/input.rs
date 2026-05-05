@@ -18,13 +18,19 @@ pub struct CommandHelper {
 
 impl Validator for CommandHelper {}
 
-impl CommandHelper {
-    pub fn new() -> Self {
-        CommandHelper {
+impl Default for CommandHelper {
+    fn default() -> Self {
+        Self {
             completer: CommandCompleter,
             hinter: CommandHinter,
             highlighter: CommandHighlighter,
         }
+    }
+}
+
+impl CommandHelper {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

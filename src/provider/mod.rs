@@ -79,6 +79,9 @@ pub struct Message {
 
 #[async_trait::async_trait]
 pub trait Provider {
+    /// Check whether the backend is reachable and healthy.
+    async fn health_check(&self) -> Result<(), String>;
+
     async fn list_models(&self) -> Vec<String>;
 
     fn select_model(&mut self, name: String);

@@ -265,9 +265,8 @@ fn strip_code_fences(content: &str) -> String {
     // Walk backwards from the end to find the start of the closing fence line.
     let inner = trimmed[content_start..].trim_end();
     // Remove trailing ``` if present
-    if inner.ends_with("```") {
-        let without_closing = inner[..inner.len() - 3].trim_end();
-        return without_closing.trim().to_string();
+    if let Some(stripped) = inner.strip_suffix("```") {
+        return stripped.trim_end().trim().to_string();
     }
 
     // No proper closing fence found inside — return as-is

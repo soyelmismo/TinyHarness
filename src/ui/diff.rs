@@ -18,11 +18,11 @@ pub fn show_write_preview<W: Write>(
         Err(_) => {
             // File doesn't exist — show a green preview
             writeln!(stdout, "\n{}  ── New file: {} ──{}", BOLD, path, RESET)?;
-            writeln!(stdout, "{}  {} {} {}", DIM, "    ", "┄".repeat(60), RESET)?;
+            writeln!(stdout, "{}     {} {}", DIM, "┄".repeat(60), RESET)?;
             for line in new_content.lines() {
-                writeln!(stdout, "{}  {}{}{}", GREEN, "+ ", RESET, line)?;
+                writeln!(stdout, "{}  + {}{}", GREEN, RESET, line)?;
             }
-            writeln!(stdout, "{}  {} {} {}", DIM, "    ", "┄".repeat(60), RESET)?;
+            writeln!(stdout, "{}     {} {}", DIM, "┄".repeat(60), RESET)?;
             return Ok(());
         }
     };
@@ -30,7 +30,7 @@ pub fn show_write_preview<W: Write>(
     let new_lines: Vec<&str> = new_content.lines().collect();
 
     writeln!(stdout, "\n{}  ── Diff for {} ──{}", BOLD, path, RESET)?;
-    writeln!(stdout, "{}  {} {} {}", DIM, "    ", "┄".repeat(60), RESET)?;
+    writeln!(stdout, "{}     {} {}", DIM, "┄".repeat(60), RESET)?;
 
     // Simple line-by-line diff using LCS-like approach
     let mut old_idx = 0;
@@ -54,8 +54,8 @@ pub fn show_write_preview<W: Write>(
                     && new_idx < new_lines.len()
                     && old_lines[old_idx + lookahead] == new_lines[new_idx]
                 {
-                    for removed in old_idx..old_idx + lookahead {
-                        writeln!(stdout, "{}  {}{}", RED, "- ", removed)?;
+                    for &removed in old_lines.iter().take(old_idx + lookahead).skip(old_idx) {
+                        writeln!(stdout, "{}  - {}{}", RED, RESET, removed)?;
                     }
                     old_idx += lookahead;
                     found = true;
@@ -69,8 +69,8 @@ pub fn show_write_preview<W: Write>(
                         && old_idx < old_lines.len()
                         && new_lines[new_idx + lookahead] == old_lines[old_idx]
                     {
-                        for added in new_idx..new_idx + lookahead {
-                            writeln!(stdout, "{}  {}{}", GREEN, "+ ", new_lines[added])?;
+                        for &added in new_lines.iter().take(new_idx + lookahead).skip(new_idx) {
+                            writeln!(stdout, "{}  + {}{}", GREEN, RESET, added)?;
                         }
                         new_idx += lookahead;
                         found = true;
@@ -81,18 +81,18 @@ pub fn show_write_preview<W: Write>(
             if !found {
                 // Can't align — treat as replace
                 if old_idx < old_lines.len() {
-                    writeln!(stdout, "{}  {}{}", RED, "- ", old_lines[old_idx])?;
+                    writeln!(stdout, "{}  - {}{}", RED, RESET, old_lines[old_idx])?;
                     old_idx += 1;
                 }
                 if new_idx < new_lines.len() {
-                    writeln!(stdout, "{}  {}{}", GREEN, "+ ", new_lines[new_idx])?;
+                    writeln!(stdout, "{}  + {}{}", GREEN, RESET, new_lines[new_idx])?;
                     new_idx += 1;
                 }
             }
         }
     }
 
-    writeln!(stdout, "{}  {} {} {}", DIM, "    ", "┄".repeat(60), RESET)?;
+    writeln!(stdout, "{}     {} {}", DIM, "┄".repeat(60), RESET)?;
 
     Ok(())
 }
@@ -150,13 +150,13 @@ pub fn show_edit_diff<W: Write>(
     )?;
 
     // Lines before the change
-    for i in start_line..line_number {
+    for (i, line) in lines.iter().enumerate().take(line_number).skip(start_line) {
         writeln!(
             stdout,
             "  {:>width$} {} {}",
             i + 1,
             DIM,
-            lines[i],
+            line,
             width = line_num_width,
         )?;
     }
