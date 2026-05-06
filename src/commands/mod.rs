@@ -45,6 +45,8 @@ pub enum Command {
     DropAll,
     Refresh,
     Init,
+    Timeout(String),
+    Retries(String),
 }
 
 /// Result of dispatching a command.
@@ -169,6 +171,8 @@ impl CommandDispatcher {
             "/files" => Some(Command::Files),
             "/refresh" => Some(Command::Refresh),
             "/init" => Some(Command::Init),
+            "/timeout" => Some(Command::Timeout(arg.unwrap_or_default())),
+            "/retries" => Some(Command::Retries(arg.unwrap_or_default())),
             _ => None,
         }
     }
@@ -199,6 +203,8 @@ impl CommandDispatcher {
             "/files",
             "/refresh",
             "/init",
+            "/timeout",
+            "/retries",
         ]
     }
 
@@ -234,7 +240,10 @@ impl CommandDispatcher {
                 "Switch to an existing session (accepts ID prefix)",
             ),
             ("/rename <name>", "Rename the current session"),
-            ("/settings", "Show current settings (provider, model, mode)"),
+            (
+                "/settings",
+                "Show current settings (provider, model, mode, timeout, retries)",
+            ),
             (
                 "/apikey [key]",
                 "Set or show the Ollama API key for web search. Use /apikey clear to remove it.",
@@ -257,6 +266,14 @@ impl CommandDispatcher {
             (
                 "/init",
                 "Generate or update TINYHARNESS.md project instructions",
+            ),
+            (
+                "/timeout [secs]",
+                "Show or set the Ollama request timeout in seconds (default: 5)",
+            ),
+            (
+                "/retries [count]",
+                "Show or set the maximum number of Ollama request retries (default: 3)",
             ),
         ]
     }
@@ -406,6 +423,67 @@ impl CommandDispatcher {
                 self.workspace_ctx = WorkspaceContext::collect();
                 self.refresh_system_prompt(messages);
                 Ok(CommandResult::Init(result))
+            }
+            Command::Timeout(arg) => {
+                if arg.is_empty() {
+                    let settings = Settings::load();
+                    println!(
+                        "{}Current timeout: {}{}s{}",
+                        BOLD, BLUE, settings.ollama_timeout_secs, RESET
+                    );
+                    return Ok(CommandResult::Ok);
+                }
+                match arg.parse::<u64>() {
+                    Ok(secs) if secs > 0 => {
+                        // Update settings
+                        let mut settings = Settings::load();
+                        settings.ollama_timeout_secs = secs;
+                        settings.save();
+                        // Update live provider
+                        let mut provider = self.provider.lock().await;
+                        provider.set_timeout(secs);
+                        println!(
+                            "{}Timeout set to {}{}s{}.{}",
+                            BOLD, BLUE, secs, RESET, RESET
+                        );
+                        Ok(CommandResult::Ok)
+                    }
+                    Ok(_) => Err("Timeout must be a positive number of seconds.".to_string()),
+                    Err(_) => Err(format!(
+                        "Invalid timeout value: '{}'. Use a number of seconds, e.g. /timeout 30",
+                        arg
+                    )),
+                }
+            }
+            Command::Retries(arg) => {
+                if arg.is_empty() {
+                    let settings = Settings::load();
+                    println!(
+                        "{}Current max retries: {}{}{}",
+                        BOLD, BLUE, settings.ollama_max_retries, RESET
+                    );
+                    return Ok(CommandResult::Ok);
+                }
+                match arg.parse::<u32>() {
+                    Ok(count) => {
+                        // Update settings
+                        let mut settings = Settings::load();
+                        settings.ollama_max_retries = count;
+                        settings.save();
+                        // Update live provider
+                        let mut provider = self.provider.lock().await;
+                        provider.set_retries(count);
+                        println!(
+                            "{}Max retries set to {}{}{}.{}",
+                            BOLD, BLUE, count, RESET, RESET
+                        );
+                        Ok(CommandResult::Ok)
+                    }
+                    Err(_) => Err(format!(
+                        "Invalid retries value: '{}'. Use a number, e.g. /retries 5",
+                        arg
+                    )),
+                }
             }
         }
     }

@@ -276,6 +276,7 @@ pub async fn stream_chat_completions(
                         tool_calls: vec![],
                     },
                     done: true,
+                    is_error: true,
                 })
                 .await;
             return;
@@ -299,7 +300,8 @@ pub async fn stream_chat_completions(
                             content: format!("\n\nStream error: {}", e),
                             tool_calls: vec![],
                         },
-                        done: false,
+                        done: true,
+                        is_error: true,
                     })
                     .await;
                 break;
@@ -360,6 +362,7 @@ pub async fn stream_chat_completions(
                         tool_calls: vec![],
                     },
                     done: false,
+                    is_error: false,
                 })
                 .await;
             response_content.clear();
@@ -391,6 +394,7 @@ pub async fn stream_chat_completions(
                 tool_calls,
             },
             done: true,
+            is_error: false,
         })
         .await;
 }

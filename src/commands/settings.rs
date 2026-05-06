@@ -39,6 +39,15 @@ pub fn execute() {
     }
 
     println!(
+        "{}│{} Timeout:   {}{}s{}",
+        BOLD, RESET, BLUE, settings.ollama_timeout_secs, RESET
+    );
+    println!(
+        "{}│{} Retries:   {}{}{}",
+        BOLD, RESET, BLUE, settings.ollama_max_retries, RESET
+    );
+
+    println!(
         "{}╰────────────────────────────────────────────╯{}",
         BOLD, RESET
     );

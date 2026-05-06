@@ -30,6 +30,8 @@ pub struct ChatMessage {
 pub struct ChatMessageResponse {
     pub message: ChatMessage,
     pub done: bool,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,4 +97,10 @@ pub trait Provider {
         send: Sender<ChatMessageResponse>,
         tools: Vec<ToolInfo>,
     );
+
+    /// Set the request timeout in seconds. Only meaningful for providers that use timeouts.
+    fn set_timeout(&mut self, _timeout_secs: u64) {}
+
+    /// Set the maximum number of retries. Only meaningful for providers that use retries.
+    fn set_retries(&mut self, _max_retries: u32) {}
 }

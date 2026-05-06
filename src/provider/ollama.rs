@@ -60,6 +60,7 @@ fn from_ollama_response(resp: OllamaChatMessageResponse) -> ChatMessageResponse 
                 .collect(),
         },
         done: resp.done,
+        is_error: false,
     }
 }
 
@@ -119,6 +120,14 @@ impl Provider for OllamaProvider {
         self.model.clone()
     }
 
+    fn set_timeout(&mut self, timeout_secs: u64) {
+        self.timeout_secs = timeout_secs;
+    }
+
+    fn set_retries(&mut self, max_retries: u32) {
+        self.max_retries = max_retries;
+    }
+
     async fn chat(
         &mut self,
         messages: Vec<Message>,
@@ -165,6 +174,7 @@ impl Provider for OllamaProvider {
                                     tool_calls: vec![],
                                 },
                                 done: true,
+                                is_error: true,
                             })
                             .await;
                         return;
@@ -182,6 +192,7 @@ impl Provider for OllamaProvider {
                                     tool_calls: vec![],
                                 },
                                 done: true,
+                                is_error: true,
                             })
                             .await;
                         return;
@@ -215,6 +226,7 @@ impl Provider for OllamaProvider {
                                 tool_calls: vec![],
                             },
                             done: true,
+                            is_error: true,
                         })
                         .await;
                     break;

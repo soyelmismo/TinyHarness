@@ -232,6 +232,7 @@ pub async fn run_agent_loop(
             let mut response_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut received_done = false;
+            let mut is_error = false;
 
             stdout.write_all(ORANGE.as_bytes())?;
 
@@ -242,6 +243,10 @@ pub async fn run_agent_loop(
 
                 if msg.done {
                     received_done = true;
+                }
+
+                if msg.is_error {
+                    is_error = true;
                 }
 
                 if !msg.message.content.is_empty() {
@@ -255,17 +260,50 @@ pub async fn run_agent_loop(
                 }
             }
 
-            if !received_done {
+            if !received_done || is_error {
+                let error_detail = if is_error {
+                    response_content.clone()
+                } else {
+                    "Provider request was interrupted.".to_string()
+                };
+
                 stdout.write_all(RESET.as_bytes())?;
                 stdout.write_all(
-                    format!(
-                        "{}Error:{} Provider request failed or was interrupted.\n",
-                        RED, RESET
-                    )
-                    .as_bytes(),
+                    format!("\n{}⚠ Request failed.{} {}\n", RED, RESET, error_detail).as_bytes(),
                 )?;
-                messages.pop();
-                break;
+
+                // Ask the user if they want to retry
+                let should_retry;
+                loop {
+                    write!(stdout, "{}Retry request? [Y/n]{} ", BOLD, RESET)?;
+                    stdout.flush()?;
+
+                    let mut answer = String::new();
+                    io::stdin()
+                        .read_line(&mut answer)
+                        .expect("Failed to read line");
+                    let answer = answer.trim().to_lowercase();
+
+                    if answer.is_empty() || answer == "y" || answer == "yes" {
+                        should_retry = true;
+                        // Drain any leftover messages in the channel before retrying
+                        while recv.try_recv().is_ok() {}
+                        break;
+                    } else if answer == "n" || answer == "no" {
+                        should_retry = false;
+                        break;
+                    } else {
+                        writeln!(stdout, "{}Please answer y or n.{}", GRAY, RESET)?;
+                        continue;
+                    }
+                }
+
+                if should_retry {
+                    continue;
+                } else {
+                    messages.pop();
+                    break;
+                }
             }
 
             stdout.write_all(RESET.as_bytes())?;
