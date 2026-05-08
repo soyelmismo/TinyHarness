@@ -1,4 +1,5 @@
-use crate::config::Settings;
+use tinyharness_lib::config::Settings;
+
 use crate::style::*;
 
 pub fn execute() {

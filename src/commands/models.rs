@@ -1,4 +1,5 @@
-use crate::provider::Provider;
+use tinyharness_lib::provider::Provider;
+
 use crate::style::*;
 
 pub async fn execute_list(provider: &dyn Provider) -> Result<(), String> {

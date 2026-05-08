@@ -14,13 +14,14 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::{
+use tinyharness_lib::{
     config::Settings,
     context::WorkspaceContext,
     mode::AgentMode,
     provider::{Message, Provider, Role},
-    style::*,
 };
+
+use crate::style::*;
 
 pub use files::FileContext;
 pub use init::InitResult;

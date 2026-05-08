@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use crate::context::{PROJECT_MD_FILE_NAMES, WorkspaceContext};
-use crate::provider::{Message, Role};
+use tinyharness_lib::context::{PROJECT_MD_FILE_NAMES, WorkspaceContext};
+use tinyharness_lib::provider::{ChatMessageResponse, Message, Provider, Role};
+
 use crate::style::*;
 
 /// Result of the `/init` command.
@@ -19,7 +20,7 @@ pub enum InitResult {
 /// and generates/updates the instruction file with build commands, test
 /// instructions, project conventions, and architecture notes.
 pub async fn execute_init(
-    provider: &mut dyn crate::provider::Provider,
+    provider: &mut dyn Provider,
     workspace_ctx: &WorkspaceContext,
     _messages: &mut Vec<Message>,
 ) -> Result<InitResult, String> {
@@ -73,7 +74,7 @@ pub async fn execute_init(
     println!("{}  {} — analyzing project...{}", CYAN, action_label, RESET);
 
     // Call the provider to generate the content
-    let (send, mut recv) = tokio::sync::mpsc::channel::<crate::provider::ChatMessageResponse>(1024);
+    let (send, mut recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
     let tools = vec![]; // No tools needed for generation
 
     provider
@@ -373,8 +374,8 @@ mod tests {
 
     #[test]
     fn test_build_init_prompt_new() {
-        use crate::context::WorkspaceContext;
         use std::path::PathBuf;
+        use tinyharness_lib::context::WorkspaceContext;
 
         let ctx = WorkspaceContext {
             root: PathBuf::from("/tmp/test"),
@@ -397,8 +398,8 @@ mod tests {
 
     #[test]
     fn test_build_init_prompt_update() {
-        use crate::context::WorkspaceContext;
         use std::path::PathBuf;
+        use tinyharness_lib::context::WorkspaceContext;
 
         let ctx = WorkspaceContext {
             root: PathBuf::from("/tmp/test"),

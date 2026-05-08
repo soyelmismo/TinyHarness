@@ -7,20 +7,24 @@ use std::{
 use rustyline::Editor;
 use tokio::sync::{Mutex, mpsc};
 
-use crate::{
-    commands::{CommandDispatcher, CommandResult, compact::execute_compact, init},
+use tinyharness_lib::{
+    config::Settings,
     mode::AgentMode,
-    provider::{ChatMessageResponse, Message, Provider, Role, ToolCall, ToolInfo},
+    provider::{ChatMessageResponse, Message, Provider, Role, TokenUsage, ToolCall, ToolInfo},
     session::Session,
     token::{
         ContextWindowSize, check_context_warning, estimate_conversation_tokens, estimate_tokens,
         format_token_count,
     },
     tools::ToolManager,
+};
+
+use crate::style::*;
+use crate::{
+    commands::{CommandDispatcher, CommandResult, compact::execute_compact, init},
     ui::confirm::prompt_tool_confirmation,
     ui::input::CommandHelper,
 };
-use crate::{provider::TokenUsage, style::*};
 
 pub async fn run_agent_loop(
     provider: Arc<Mutex<dyn Provider + Send + Sync>>,
@@ -365,7 +369,7 @@ pub async fn run_agent_loop(
         let estimated_total = estimate_conversation_tokens(messages);
 
         // Use configured context limit for warnings, or fall back to default
-        let settings = crate::config::Settings::load();
+        let settings = Settings::load();
         let context_size = settings
             .context_limit
             .map(ContextWindowSize::Custom)

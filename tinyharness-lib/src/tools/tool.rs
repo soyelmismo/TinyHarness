@@ -11,7 +11,7 @@ use crate::provider::ToolInfo;
 /// Creates `let` bindings for each named argument, with early return on missing args.
 ///
 /// # Example
-/// ```
+/// ```ignore
 /// extract_args!(args, path, content);
 /// // expands to:
 /// // let path = match require_arg(&args, "path") { Ok(v) => v, Err(e) => return e };
@@ -35,7 +35,7 @@ macro_rules! extract_args {
 /// provided name, description, schema, and handler.
 ///
 /// # Example
-/// ```
+/// ```ignore
 /// define_tool!(
 ///     write_tool_entry, "write",
 ///     "Write content to a file.",

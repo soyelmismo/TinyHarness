@@ -18,7 +18,7 @@ use crate::tools::tool::Tool;
 /// Register multiple tools at once.
 ///
 /// # Example
-/// ```
+/// ```ignore
 /// register_tools!(self,
 ///     crate::tools::ls::ls_tool_entry,
 ///     crate::tools::read::read_tool_entry,

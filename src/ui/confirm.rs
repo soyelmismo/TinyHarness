@@ -5,7 +5,8 @@ use std::{
 
 use super::diff::{show_edit_diff, show_write_preview};
 use super::wrap::MAX_LINE_WIDTH;
-use crate::provider::ToolCall;
+use tinyharness_lib::provider::ToolCall;
+
 use crate::style::*;
 
 /// Maximum width available for the command text on the first line,

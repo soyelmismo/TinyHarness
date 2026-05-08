@@ -1,21 +1,14 @@
 pub mod agent;
 pub mod commands;
-pub mod config;
-pub mod context;
-pub mod mode;
-pub mod provider;
-pub mod session;
 pub mod style;
-pub mod token;
-pub mod tools;
 pub mod ui;
 
 use std::{error::Error, sync::Arc};
 
-use crate::{
-    agent::run_agent_loop,
-    commands::CommandDispatcher,
+use tinyharness_lib::{
     config::{ProviderKind, Settings},
+    context::WorkspaceContext,
+    mode::AgentMode,
     provider::{
         Message, Provider, Role, llama_cpp::LlamaCppProvider, ollama::OllamaProvider,
         vllm::VllmProvider,
@@ -23,6 +16,8 @@ use crate::{
     session::Session,
     tools::ToolManager,
 };
+
+use crate::{agent::run_agent_loop, commands::CommandDispatcher};
 use clap::Parser;
 use style::*;
 use tokio::sync::Mutex;
@@ -143,10 +138,10 @@ async fn auto_select_model(provider: &mut dyn Provider, saved_model: Option<&Str
 /// Create a brand-new session with an initial system prompt message.
 fn create_initial_session(
     working_dir: &str,
-    initial_mode: crate::mode::AgentMode,
+    initial_mode: AgentMode,
     provider_str: &str,
     current_model: Option<String>,
-    workspace_ctx: &crate::context::WorkspaceContext,
+    workspace_ctx: &WorkspaceContext,
 ) -> (Session, Vec<Message>) {
     let sess = Session::new(working_dir, initial_mode, provider_str, current_model);
     let system_prompt = format!(
@@ -198,7 +193,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let ollama_tools = tool_manager.get_ollama_tools();
 
     // Collect workspace context and build the system prompt with the saved mode
-    let workspace_ctx = context::WorkspaceContext::collect();
+    let workspace_ctx = WorkspaceContext::collect();
     let initial_mode = settings.preferred_mode;
 
     let provider_str = provider_kind.to_string();

@@ -1,4 +1,5 @@
-use crate::provider::{Message, Role};
+use tinyharness_lib::provider::{ChatMessageResponse, Message, Provider, Role};
+
 use crate::style::*;
 
 /// Compact the conversation history by summarizing older messages.
@@ -7,7 +8,7 @@ use crate::style::*;
 /// while replacing all intermediate messages with a single summary message.
 /// The provider is used to generate the summary.
 pub async fn execute_compact(
-    provider: &mut dyn crate::provider::Provider,
+    provider: &mut dyn Provider,
     messages: &mut Vec<Message>,
     focus: &str,
 ) -> Result<(), String> {
@@ -51,11 +52,13 @@ pub async fn execute_compact(
             Role::Assistant => "ASSISTANT",
             Role::Tool => "TOOL",
         };
-        // Truncate very long messages
+        // Truncate very long messages (use floor_char_boundary to avoid
+        // slicing inside a multi-byte UTF-8 character)
         let content = if msg.content.len() > 2000 {
+            let truncate_at = msg.content.floor_char_boundary(2000);
             format!(
                 "{}... [truncated, {} chars total]",
-                &msg.content[..2000],
+                &msg.content[..truncate_at],
                 msg.content.len()
             )
         } else {
@@ -105,7 +108,7 @@ pub async fn execute_compact(
     );
 
     // Use the provider to generate a summary
-    let (send, mut recv) = tokio::sync::mpsc::channel::<crate::provider::ChatMessageResponse>(1024);
+    let (send, mut recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
 
     // We need no tools for summarization
     let tools = vec![];

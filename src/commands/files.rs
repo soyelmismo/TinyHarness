@@ -1,4 +1,5 @@
-use crate::provider::{Message, Role};
+use tinyharness_lib::provider::{Message, Role};
+
 use crate::style::*;
 
 /// Manages pinned files whose content is injected into the system prompt context.
