@@ -1,6 +1,4 @@
-use tokio::sync::mpsc::Sender;
-
-use crate::provider::{ChatMessageResponse, Message, Provider, ToolInfo};
+use crate::provider::{ChatMessageResponse, Message, Provider, ToolDefinition};
 
 use super::openai_compat::OpenAiCompatInner;
 
@@ -23,7 +21,7 @@ impl Provider for LlamaCppProvider {
     }
 
     async fn list_models(&self) -> Vec<String> {
-        self.inner.model.clone().into_iter().collect()
+        self.inner.current_model().into_iter().collect()
     }
 
     fn select_model(&mut self, name: String) {
@@ -37,14 +35,8 @@ impl Provider for LlamaCppProvider {
     async fn chat(
         &mut self,
         messages: Vec<Message>,
-        prompt: String,
-        send: Sender<ChatMessageResponse>,
-        tools: Vec<ToolInfo>,
-    ) {
-        self.inner.chat(messages, prompt, send, tools).await;
-    }
-
-    fn last_token_usage(&self) -> Option<crate::provider::TokenUsage> {
-        self.inner.last_token_usage()
+        tools: Vec<ToolDefinition>,
+    ) -> tokio::sync::mpsc::Receiver<ChatMessageResponse> {
+        self.inner.chat(messages, tools)
     }
 }

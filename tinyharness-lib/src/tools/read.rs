@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 
 use crate::define_tool;
 use crate::extract_args;
-use crate::tools::tool::BoxFuture;
+use crate::tools::tool::{BoxFuture, ToolCategory};
 
 pub fn read_tool(args: HashMap<String, String>) -> BoxFuture<'static, String> {
     Box::pin(async move {
@@ -57,6 +57,7 @@ fn read_partial(path: &str, from: usize, to: usize) -> String {
 define_tool!(
     read_tool_entry, "read",
     "Read file content. Returns the entire file or a specific line range if from/to are provided.",
+     ToolCategory::ReadOnly,
     required: [("path", "The absolute path to the file to read")],
     optional: [
         ("from", "Starting line number (0-based, optional)", "0"),

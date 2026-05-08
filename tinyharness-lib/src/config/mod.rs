@@ -1,4 +1,4 @@
-use std::{fmt, fs, io::Write, path::PathBuf, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +35,9 @@ impl FromStr for ProviderKind {
     }
 }
 
-/// Persisted application settings.
+/// Persisted application settings — pure data type with no I/O.
+///
+/// Use `SettingsStore` to load and save instances of this type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub last_provider: ProviderKind,
@@ -64,83 +66,157 @@ impl Default for Settings {
     }
 }
 
-fn settings_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config/tinyharness")
+// ── Errors ──────────────────────────────────────────────────────────────────
+
+/// Error type for settings I/O operations.
+#[derive(Debug)]
+pub enum SettingsError {
+    Io(std::io::Error),
+    Parse(serde_json::Error),
 }
 
-fn settings_path() -> PathBuf {
-    settings_dir().join("settings.json")
+impl std::fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SettingsError::Io(e) => write!(f, "I/O error: {}", e),
+            SettingsError::Parse(e) => write!(f, "parse error: {}", e),
+        }
+    }
 }
 
-impl Settings {
-    /// Load settings from disk. Returns defaults if the file doesn't exist or is corrupt.
-    pub fn load() -> Self {
-        let path = settings_path();
-        if !path.exists() {
-            return Settings::default();
+impl std::error::Error for SettingsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SettingsError::Io(e) => Some(e),
+            SettingsError::Parse(e) => Some(e),
         }
-        match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                eprintln!(
-                    "Warning: Failed to parse settings file: {}. Using defaults.",
-                    e
-                );
-                Settings::default()
-            }),
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to read settings file: {}. Using defaults.",
-                    e
-                );
-                Settings::default()
-            }
+    }
+}
+
+impl From<std::io::Error> for SettingsError {
+    fn from(e: std::io::Error) -> Self {
+        SettingsError::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for SettingsError {
+    fn from(e: serde_json::Error) -> Self {
+        SettingsError::Parse(e)
+    }
+}
+
+// ── Settings store ─────────────────────────────────────────────────────────
+
+/// Handles persistence of [`Settings`] to disk.
+///
+/// By default, uses `~/.config/tinyharness/settings.json`. This can be
+/// overridden with [`SettingsStore::new`] for testing or alternative paths.
+pub struct SettingsStore {
+    path: std::path::PathBuf,
+}
+
+impl SettingsStore {
+    /// Create a store that reads/writes from the default path
+    /// (`~/.config/tinyharness/settings.json`).
+    pub fn default_path() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let path = std::path::PathBuf::from(home).join(".config/tinyharness/settings.json");
+        SettingsStore { path }
+    }
+
+    /// Create a store that reads/writes from a custom path.
+    pub fn new(path: std::path::PathBuf) -> Self {
+        SettingsStore { path }
+    }
+
+    /// Load settings from disk.
+    ///
+    /// Returns `Ok(Settings)` with defaults if the file doesn't exist,
+    /// or an error if the file exists but cannot be parsed.
+    pub fn load(&self) -> Result<Settings, SettingsError> {
+        if !self.path.exists() {
+            return Ok(Settings::default());
         }
+        let content = std::fs::read_to_string(&self.path)?;
+        let settings = serde_json::from_str(&content)?;
+        Ok(settings)
+    }
+
+    /// Load settings from disk, returning defaults on any error.
+    ///
+    /// This matches the original behaviour and is suitable for application
+    /// startup where you don't want to fail on corrupt settings files.
+    pub fn load_or_default(&self) -> Settings {
+        self.load().unwrap_or_else(|e| {
+            eprintln!("Warning: Failed to load settings: {}. Using defaults.", e);
+            Settings::default()
+        })
     }
 
     /// Save settings to disk atomically (write to temp file, then rename).
-    pub fn save(&self) {
-        let dir = settings_dir();
-        if let Err(e) = fs::create_dir_all(&dir) {
-            eprintln!("Warning: Failed to create settings directory: {}", e);
-            return;
-        }
+    pub fn save(&self, settings: &Settings) -> Result<(), SettingsError> {
+        let dir = self.path.parent().ok_or_else(|| {
+            SettingsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "settings path has no parent directory",
+            ))
+        })?;
+        std::fs::create_dir_all(dir)?;
 
-        let json = match serde_json::to_string_pretty(self) {
-            Ok(j) => j,
-            Err(e) => {
-                eprintln!("Warning: Failed to serialize settings: {}", e);
-                return;
-            }
-        };
-
+        let json = serde_json::to_string_pretty(settings)?;
         let tmp_path = dir.join("settings.json.tmp");
-        let final_path = settings_path();
 
-        // Write to temp file
-        match fs::File::create(&tmp_path) {
-            Ok(mut file) => {
-                if let Err(e) = file.write_all(json.as_bytes()) {
-                    eprintln!("Warning: Failed to write settings: {}", e);
-                    let _ = fs::remove_file(&tmp_path);
-                    return;
-                }
-                if let Err(e) = file.flush() {
-                    eprintln!("Warning: Failed to flush settings: {}", e);
-                    let _ = fs::remove_file(&tmp_path);
-                    return;
-                }
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to create settings file: {}", e);
-                return;
-            }
+        {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            std::io::Write::write_all(&mut file, json.as_bytes())?;
+            std::io::Write::flush(&mut file)?;
         }
 
-        // Atomic rename
-        if let Err(e) = fs::rename(&tmp_path, &final_path) {
-            eprintln!("Warning: Failed to rename settings file: {}", e);
-            let _ = fs::remove_file(&tmp_path);
-        }
+        std::fs::rename(&tmp_path, &self.path)?;
+        Ok(())
+    }
+
+    /// Returns the path where settings are stored.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+// ── Backward-compatible convenience methods on Settings ────────────────────
+
+impl Settings {
+    /// Load settings from the default path, returning defaults on any error.
+    ///
+    /// Convenience method that delegates to [`SettingsStore::default_path().load_or_default()`].
+    pub fn load() -> Self {
+        load_settings()
+    }
+
+    /// Save settings to the default path atomically.
+    ///
+    /// On error, prints a warning to stderr.
+    /// Convenience method that delegates to [`save_settings`].
+    pub fn save(&self) {
+        save_settings(self);
+    }
+}
+
+// ── Free convenience functions ─────────────────────────────────────────────
+
+/// Load settings from the default path, returning defaults on any error.
+///
+/// This is a convenience wrapper around [`SettingsStore::default_path().load_or_default()`].
+pub fn load_settings() -> Settings {
+    SettingsStore::default_path().load_or_default()
+}
+
+/// Save settings to the default path atomically.
+///
+/// This is a convenience wrapper around [`SettingsStore::default_path().save()`].
+/// On error, prints a warning to stderr (matching the original behaviour).
+pub fn save_settings(settings: &Settings) {
+    let store = SettingsStore::default_path();
+    if let Err(e) = store.save(settings) {
+        eprintln!("Warning: Failed to save settings: {}", e);
     }
 }

@@ -3,11 +3,10 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
 
 use crate::provider::{
-    ChatMessage, ChatMessageResponse, Message, Role, ToolCall, ToolCallFunction, ToolInfo,
+    ChatMessage, ChatMessageResponse, Message, Role, ToolCall, ToolCallFunction, ToolDefinition,
 };
 
 /// Shared inner state for OpenAI-compatible providers (llama.cpp, vLLM, etc.).
@@ -15,10 +14,9 @@ use crate::provider::{
 /// Encapsulates the common `{client, base_url, model}` fields and all shared
 /// logic so that provider implementations only need to differ in `list_models()`.
 pub struct OpenAiCompatInner {
-    pub client: Client,
-    pub base_url: String,
-    pub model: Option<String>,
-    pub last_usage: Option<crate::provider::TokenUsage>,
+    client: Client,
+    base_url: String,
+    model: Option<String>,
 }
 
 impl OpenAiCompatInner {
@@ -32,7 +30,6 @@ impl OpenAiCompatInner {
             client,
             base_url,
             model: None,
-            last_usage: None,
         }
     }
 
@@ -56,14 +53,6 @@ impl OpenAiCompatInner {
 
     pub fn current_model(&self) -> Option<String> {
         self.model.clone()
-    }
-
-    pub fn last_token_usage(&self) -> Option<crate::provider::TokenUsage> {
-        self.last_usage.clone()
-    }
-
-    pub fn set_last_token_usage(&mut self, usage: Option<crate::provider::TokenUsage>) {
-        self.last_usage = usage;
     }
 
     /// Return the `/v1/chat/completions` URL for this server.
@@ -90,16 +79,19 @@ impl OpenAiCompatInner {
     }
 
     /// Stream chat completions using the OpenAI-compatible API.
-    pub async fn chat(
-        &mut self,
+    /// Returns a receiver for streaming response chunks.
+    pub fn chat(
+        &self,
         messages: Vec<Message>,
-        _prompt: String,
-        send: Sender<ChatMessageResponse>,
-        tools: Vec<ToolInfo>,
-    ) {
+        tools: Vec<ToolDefinition>,
+    ) -> tokio::sync::mpsc::Receiver<ChatMessageResponse> {
+        let (send, recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
+
         let model = self.model.clone().unwrap_or_default();
         let openai_messages = messages.into_iter().map(to_openai_message).collect();
         let openai_tools = tools.into_iter().map(to_openai_tool).collect();
+        let client = self.client.clone();
+        let chat_url = self.chat_url();
 
         let body = ChatRequest {
             model,
@@ -108,8 +100,12 @@ impl OpenAiCompatInner {
             tools: openai_tools,
         };
 
-        let usage = stream_chat_completions(&self.client, &self.chat_url(), &body, &send).await;
-        self.last_usage = usage;
+        // Spawn the streaming work on a background task
+        tokio::spawn(async move {
+            let _usage = stream_chat_completions(&client, &chat_url, &body, &send).await;
+        });
+
+        recv
     }
 }
 
@@ -270,7 +266,7 @@ pub fn to_openai_message(msg: Message) -> OpenAIMessage {
     }
 }
 
-pub fn to_openai_tool(ti: ToolInfo) -> OpenAITool {
+pub fn to_openai_tool(ti: ToolDefinition) -> OpenAITool {
     OpenAITool {
         tool_type: "function".to_string(),
         function: OpenAIToolFunction {
@@ -288,7 +284,7 @@ pub async fn stream_chat_completions(
     client: &reqwest::Client,
     url: &str,
     body: &ChatRequest,
-    send: &Sender<ChatMessageResponse>,
+    send: &tokio::sync::mpsc::Sender<ChatMessageResponse>,
 ) -> Option<crate::provider::TokenUsage> {
     let response = match client.post(url).json(body).send().await {
         Ok(r) => r,

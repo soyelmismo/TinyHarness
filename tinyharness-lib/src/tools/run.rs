@@ -5,6 +5,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::define_tool;
 use crate::extract_args;
+use crate::tools::tool::ToolCategory;
 
 /// Execute a shell command asynchronously with a timeout.
 /// Returns stdout, stderr, exit code, and duration.
@@ -139,6 +140,7 @@ pub async fn run_tool(args: HashMap<String, String>) -> String {
 define_tool!(
     run_tool_entry, "run",
     "Execute a shell command and return its output. Use for building, testing, running git commands, or any terminal operation. Includes stdout, stderr, exit code, and duration. Output is truncated at 5000 chars for stdout and 2000 for stderr. Default timeout is 30 seconds.",
+    ToolCategory::Destructive,
     required: [("command", "The shell command to execute")],
     optional: [
         ("timeout", "Timeout in milliseconds (default: 30000)", "30000"),

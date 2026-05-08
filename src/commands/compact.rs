@@ -1,4 +1,4 @@
-use tinyharness_lib::provider::{ChatMessageResponse, Message, Provider, Role};
+use tinyharness_lib::provider::{Message, Provider, Role};
 
 use crate::style::*;
 
@@ -107,20 +107,9 @@ pub async fn execute_compact(
         RESET
     );
 
-    // Use the provider to generate a summary
-    let (send, mut recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
-
-    // We need no tools for summarization
+    // Use the provider to generate a summary — no tools needed
     let tools = vec![];
-
-    provider
-        .chat(
-            summarization_messages,
-            "Summarize the conversation".to_string(),
-            send,
-            tools,
-        )
-        .await;
+    let mut recv = provider.chat(summarization_messages, tools).await;
 
     // Collect the summary
     let mut summary_content = String::new();

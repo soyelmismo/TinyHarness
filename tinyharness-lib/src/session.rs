@@ -48,57 +48,89 @@ pub enum SessionEntry {
     Message(Message),
 }
 
-// ── Session directory ──────────────────────────────────────────────────────
+// ── Error type ──────────────────────────────────────────────────────────────
 
-fn sessions_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".local/share/tinyharness/sessions")
+/// Error type for session I/O operations.
+#[derive(Debug)]
+pub enum SessionError {
+    Io(std::io::Error),
+    Parse(serde_json::Error),
+    NotFound(String),
 }
 
-fn now_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-/// Read the metadata entry from the first line of a session file.
-fn read_session_meta(path: &PathBuf) -> Option<SessionMeta> {
-    let file = fs::File::open(path).ok()?;
-    let mut reader = io::BufReader::new(file);
-    let mut first_line = String::new();
-    if reader.read_line(&mut first_line).ok()? == 0 {
-        return None;
-    }
-    if let Ok(SessionEntry::Meta(meta)) = serde_json::from_str::<SessionEntry>(first_line.trim()) {
-        Some(meta)
-    } else {
-        None
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionError::Io(e) => write!(f, "I/O error: {}", e),
+            SessionError::Parse(e) => write!(f, "parse error: {}", e),
+            SessionError::NotFound(s) => write!(f, "{}", s),
+        }
     }
 }
 
-// ── Session handle ─────────────────────────────────────────────────────────
-
-/// Manages a session's lifecycle: writing entries to the JSONL file.
-pub struct Session {
-    meta: SessionMeta,
-    path: PathBuf,
-    dirty: bool,                // whether we need to rewrite the meta line
-    messages_since_save: usize, // counter for auto-save threshold
-    created: bool,              // is on disk
+impl std::error::Error for SessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SessionError::Io(e) => Some(e),
+            SessionError::Parse(e) => Some(e),
+            SessionError::NotFound(_) => None,
+        }
+    }
 }
 
-/// Auto-save threshold: flush metadata every N messages appended.
-const AUTO_SAVE_INTERVAL: usize = 5;
+impl From<std::io::Error> for SessionError {
+    fn from(e: std::io::Error) -> Self {
+        SessionError::Io(e)
+    }
+}
 
-impl Session {
-    /// Create a brand-new session. The session file is NOT written to disk
-    /// until the first message is appended (lazy creation), so that
-    /// command-only sessions don't leave empty files behind.
-    pub fn new(working_dir: &str, mode: AgentMode, provider: &str, model: Option<String>) -> Self {
+impl From<serde_json::Error> for SessionError {
+    fn from(e: serde_json::Error) -> Self {
+        SessionError::Parse(e)
+    }
+}
+
+// ── Session store ───────────────────────────────────────────────────────────
+
+/// Handles persistence of sessions as JSONL files in a directory.
+///
+/// By default, uses `~/.local/share/tinyharness/sessions/`. This can be
+/// overridden with [`SessionStore::new`] for testing or alternative paths.
+pub struct SessionStore {
+    dir: PathBuf,
+}
+
+impl SessionStore {
+    /// Create a store that uses the default session directory
+    /// (`~/.local/share/tinyharness/sessions/`).
+    pub fn default_path() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let dir = PathBuf::from(home).join(".local/share/tinyharness/sessions");
+        SessionStore { dir }
+    }
+
+    /// Create a store that uses a custom directory.
+    pub fn new(dir: PathBuf) -> Self {
+        SessionStore { dir }
+    }
+
+    /// Ensure the session directory exists.
+    fn ensure_dir(&self) -> Result<(), SessionError> {
+        fs::create_dir_all(&self.dir)?;
+        Ok(())
+    }
+
+    /// Create a brand-new session and write its initial metadata to disk.
+    /// Returns the new `Session` handle.
+    pub fn create(
+        &self,
+        working_dir: &str,
+        mode: AgentMode,
+        provider: &str,
+        model: Option<String>,
+    ) -> Session {
         let id = Uuid::new_v4().to_string();
         let now = now_timestamp();
-        // Auto-generate a session name from the working directory basename
         let auto_name = std::path::Path::new(working_dir)
             .file_name()
             .and_then(|n| n.to_str())
@@ -117,37 +149,39 @@ impl Session {
             message_count: 0,
         };
 
-        let dir = sessions_dir();
-        fs::create_dir_all(&dir).ok();
-
-        let path = dir.join(format!("{}.jsonl", meta.id));
-
-        Session {
-            meta,
-            path,
+        // Eagerly create the session file so callers get immediate feedback on errors
+        let mut session = Session {
+            meta: meta.clone(),
+            path: self.dir.join(format!("{}.jsonl", meta.id)),
+            store: Some(self.clone_store()),
             dirty: true,
             messages_since_save: 0,
             created: false,
-        }
+        };
+        session.ensure_created();
+        session
     }
 
-    /// Resume an existing session from its JSONL file.
-    pub fn load(session_id: &str) -> Result<(Self, Vec<Message>), String> {
-        let dir = sessions_dir();
-        let path = dir.join(format!("{}.jsonl", session_id));
+    /// Load an existing session by its full ID.
+    /// Returns the session handle and the conversation messages.
+    pub fn load(&self, session_id: &str) -> Result<(Session, Vec<Message>), SessionError> {
+        let path = self.dir.join(format!("{}.jsonl", session_id));
 
         if !path.exists() {
-            return Err(format!("Session '{}' not found", session_id));
+            return Err(SessionError::NotFound(format!(
+                "Session '{}' not found",
+                session_id
+            )));
         }
 
-        let file = fs::File::open(&path).map_err(|e| format!("Failed to open session: {}", e))?;
+        let file = fs::File::open(&path)?;
         let reader = io::BufReader::new(file);
 
         let mut meta: Option<SessionMeta> = None;
         let mut messages: Vec<Message> = Vec::new();
 
         for line in reader.lines() {
-            let line = line.map_err(|e| format!("Failed to read session line: {}", e))?;
+            let line = line?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -159,18 +193,20 @@ impl Session {
                 Ok(SessionEntry::Message(msg)) => {
                     messages.push(msg);
                 }
-                Err(e) => {
+                Err(_) => {
                     // Skip malformed lines rather than failing
-                    eprintln!("Warning: Skipping malformed session entry: {}", e);
                 }
             }
         }
 
-        let meta = meta.ok_or_else(|| "Session file has no metadata entry".to_string())?;
+        let meta = meta.ok_or_else(|| {
+            SessionError::Parse(serde_json::from_str::<SessionEntry>("").unwrap_err())
+        })?;
 
         let session = Session {
             meta: meta.clone(),
             path,
+            store: Some(self.clone_store()),
             dirty: false,
             messages_since_save: 0,
             created: true,
@@ -180,13 +216,12 @@ impl Session {
     }
 
     /// Find the most recent session for a given working directory.
-    pub fn find_latest_for_dir(working_dir: &str) -> Option<String> {
-        let dir = sessions_dir();
-        if !dir.exists() {
+    pub fn find_latest_for_dir(&self, working_dir: &str) -> Option<String> {
+        if !self.dir.exists() {
             return None;
         }
 
-        let entries = fs::read_dir(&dir).ok()?;
+        let entries = fs::read_dir(&self.dir).ok()?;
         let mut best: Option<(u64, String)> = None;
 
         for entry in entries.flatten() {
@@ -215,39 +250,40 @@ impl Session {
         best.map(|(_, id)| id)
     }
 
-    /// Find a session by an ID prefix (e.g. first 12 chars).
-    /// Returns the full session ID if exactly one match is found.
-    pub fn find_by_prefix(prefix: &str) -> Result<String, String> {
-        let all = Self::list_all();
+    /// Find a session by an ID prefix.
+    pub fn find_by_prefix(&self, prefix: &str) -> Result<String, SessionError> {
+        let all = self.list_all();
         let matches: Vec<&SessionMeta> = all.iter().filter(|m| m.id.starts_with(prefix)).collect();
 
         match matches.len() {
-            0 => Err(format!("No session found matching '{}'", prefix)),
+            0 => Err(SessionError::NotFound(format!(
+                "No session found matching '{}'",
+                prefix
+            ))),
             1 => Ok(matches[0].id.clone()),
             _ => {
                 let ids: Vec<&str> = matches
                     .iter()
                     .map(|m| &m.id[..12.min(m.id.len())])
                     .collect();
-                Err(format!(
+                Err(SessionError::NotFound(format!(
                     "Multiple sessions match '{}': {}",
                     prefix,
                     ids.join(", ")
-                ))
+                )))
             }
         }
     }
 
     /// List all sessions, most recently updated first.
-    pub fn list_all() -> Vec<SessionMeta> {
-        let dir = sessions_dir();
-        if !dir.exists() {
+    pub fn list_all(&self) -> Vec<SessionMeta> {
+        if !self.dir.exists() {
             return Vec::new();
         }
 
         let mut sessions: Vec<SessionMeta> = Vec::new();
 
-        if let Ok(entries) = fs::read_dir(&dir) {
+        if let Ok(entries) = fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -264,11 +300,99 @@ impl Session {
         sessions
     }
 
+    /// Returns the directory path where sessions are stored.
+    pub fn dir(&self) -> &PathBuf {
+        &self.dir
+    }
+
+    /// Clone the store handle (needed because SessionStore is not Clone).
+    /// Uses the same directory path.
+    fn clone_store(&self) -> SessionStore {
+        SessionStore {
+            dir: self.dir.clone(),
+        }
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn now_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn read_session_meta(path: &PathBuf) -> Option<SessionMeta> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = io::BufReader::new(file);
+    let mut first_line = String::new();
+    if reader.read_line(&mut first_line).ok()? == 0 {
+        return None;
+    }
+    if let Ok(SessionEntry::Meta(meta)) = serde_json::from_str::<SessionEntry>(first_line.trim()) {
+        Some(meta)
+    } else {
+        None
+    }
+}
+
+// ── Session handle ─────────────────────────────────────────────────────────
+
+/// Manages a session's lifecycle: writing entries to the JSONL file.
+///
+/// Use [`SessionStore`] to create or load sessions. The `Session` type
+/// handles the actual message appending, metadata updates, and auto-save.
+pub struct Session {
+    meta: SessionMeta,
+    path: PathBuf,
+    store: Option<SessionStore>,
+    dirty: bool,
+    messages_since_save: usize,
+    created: bool,
+}
+
+/// Auto-save threshold: flush metadata every N messages appended.
+const AUTO_SAVE_INTERVAL: usize = 5;
+
+impl Session {
+    /// Create a brand-new session using the default session directory.
+    /// The session file is lazily created on first message append.
+    ///
+    /// For more control, use [`SessionStore::create`].
+    pub fn new(working_dir: &str, mode: AgentMode, provider: &str, model: Option<String>) -> Self {
+        let store = SessionStore::default_path();
+        store.create(working_dir, mode, provider, model)
+    }
+
+    /// Load an existing session from its JSONL file using the default directory.
+    ///
+    /// For more control, use [`SessionStore::load`].
+    pub fn load(session_id: &str) -> Result<(Self, Vec<Message>), String> {
+        let store = SessionStore::default_path();
+        store.load(session_id).map_err(|e| e.to_string())
+    }
+
+    /// Find the most recent session for a given working directory.
+    pub fn find_latest_for_dir(working_dir: &str) -> Option<String> {
+        SessionStore::default_path().find_latest_for_dir(working_dir)
+    }
+
+    /// Find a session by an ID prefix using the default directory.
+    pub fn find_by_prefix(prefix: &str) -> Result<String, String> {
+        SessionStore::default_path()
+            .find_by_prefix(prefix)
+            .map_err(|e| e.to_string())
+    }
+
+    /// List all sessions using the default directory.
+    pub fn list_all() -> Vec<SessionMeta> {
+        SessionStore::default_path().list_all()
+    }
+
     // ── Mutating operations ────────────────────────────────────────────
 
     /// Append a message to the session file and update metadata.
-    /// Triggers an auto-save (flush) every [`AUTO_SAVE_INTERVAL`] messages.
-    /// On the first call, materializes the session file on disk.
     pub fn append_message(&mut self, message: &Message) {
         self.ensure_created();
         self.write_entry(&SessionEntry::Message(message.clone()));
@@ -304,7 +428,6 @@ impl Session {
     }
 
     /// Flush any metadata changes back to the file (rewrite the first line).
-    /// If the session file hasn't been created yet, materializes it first.
     pub fn flush(&mut self) {
         if !self.dirty {
             return;
@@ -312,14 +435,9 @@ impl Session {
 
         self.ensure_created();
 
-        // Rewrite the file: read all lines, replace the first line with updated meta,
-        // write everything back atomically.
         let file = match fs::read_to_string(&self.path) {
             Ok(content) => content,
-            Err(e) => {
-                eprintln!("Warning: Failed to read session file for flush: {}", e);
-                return;
-            }
+            Err(_) => return,
         };
 
         let lines: Vec<&str> = file.lines().collect();
@@ -329,22 +447,17 @@ impl Session {
 
         let meta_line = match serde_json::to_string(&SessionEntry::Meta(self.meta.clone())) {
             Ok(l) => l,
-            Err(e) => {
-                eprintln!("Warning: Failed to serialize session meta: {}", e);
-                return;
-            }
+            Err(_) => return,
         };
 
         let tmp_path = self.path.with_extension("jsonl.tmp");
 
         match fs::File::create(&tmp_path) {
             Ok(mut file) => {
-                // Write updated meta as first line
                 if writeln!(file, "{}", meta_line).is_err() {
                     let _ = fs::remove_file(&tmp_path);
                     return;
                 }
-                // Write remaining lines (skip original first line)
                 for line in lines.iter().skip(1) {
                     if writeln!(file, "{}", line).is_err() {
                         let _ = fs::remove_file(&tmp_path);
@@ -356,10 +469,7 @@ impl Session {
                     return;
                 }
             }
-            Err(e) => {
-                eprintln!("Warning: Failed to create temp session file: {}", e);
-                return;
-            }
+            Err(_) => return,
         }
 
         if fs::rename(&tmp_path, &self.path).is_err() {
@@ -381,12 +491,22 @@ impl Session {
 
     // ── Internal ────────────────────────────────────────────────────────
 
-    /// Materialize the session file on disk if it hasn't been created yet.
-    /// Writes the meta entry as the first line.
     fn ensure_created(&mut self) {
         if self.created {
             return;
         }
+
+        // Ensure directory exists
+        if let Some(store) = &self.store {
+            let _ = store.ensure_dir();
+        } else {
+            let _ = fs::create_dir_all(
+                self.path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            );
+        }
+
         self.write_entry(&SessionEntry::Meta(self.meta.clone()));
         self.created = true;
     }
@@ -394,33 +514,21 @@ impl Session {
     fn write_entry(&self, entry: &SessionEntry) {
         let line = match serde_json::to_string(entry) {
             Ok(l) => l,
-            Err(e) => {
-                eprintln!("Warning: Failed to serialize session entry: {}", e);
-                return;
-            }
+            Err(_) => return,
         };
 
-        match fs::OpenOptions::new()
+        if let Ok(mut file) = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
         {
-            Ok(mut file) => {
-                if let Err(e) = writeln!(file, "{}", line) {
-                    eprintln!("Warning: Failed to write session entry: {}", e);
-                }
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to open session file for writing: {}", e);
-            }
+            let _ = writeln!(file, "{}", line);
         }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Only flush if the file was actually created — don't materialize
-        // a lazy session just because it was dropped.
         if self.created {
             self.flush();
         }

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use tinyharness_lib::context::{PROJECT_MD_FILE_NAMES, WorkspaceContext};
-use tinyharness_lib::provider::{ChatMessageResponse, Message, Provider, Role};
+use tinyharness_lib::provider::{Message, Provider, Role};
 
 use crate::style::*;
 
@@ -73,18 +73,9 @@ pub async fn execute_init(
 
     println!("{}  {} — analyzing project...{}", CYAN, action_label, RESET);
 
-    // Call the provider to generate the content
-    let (send, mut recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
-    let tools = vec![]; // No tools needed for generation
-
-    provider
-        .chat(
-            init_messages,
-            "Generate project instruction file".to_string(),
-            send,
-            tools,
-        )
-        .await;
+    // Call the provider to generate the content — no tools needed
+    let tools = vec![];
+    let mut recv = provider.chat(init_messages, tools).await;
 
     // Collect the response
     let mut generated_content = String::new();

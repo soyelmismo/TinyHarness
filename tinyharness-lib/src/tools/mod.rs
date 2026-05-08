@@ -12,8 +12,26 @@ pub mod tool;
 pub mod web_search;
 pub mod write;
 
-use crate::provider::ToolInfo;
-use crate::tools::tool::Tool;
+use crate::mode::AgentMode;
+use crate::provider::ToolDefinition;
+use crate::tools::tool::{Tool, ToolCategory};
+
+/// Events emitted by signal-category tools that the caller must interpret.
+/// These tools return a result string, but the caller should parse these
+/// into structured events for proper handling (e.g., prompting the user,
+/// switching mode, triggering compaction).
+#[derive(Debug, Clone)]
+pub enum SignalEvent {
+    /// The model requests a mode switch.
+    SwitchMode { mode: AgentMode },
+    /// The model asks the user a question with options.
+    Question {
+        question: String,
+        answers: Vec<String>,
+    },
+    /// The model requests conversation compaction.
+    AutoCompact { focus: String },
+}
 
 /// Register multiple tools at once.
 ///
@@ -68,54 +86,78 @@ impl ToolManager {
         self.tools.push(tool);
     }
 
-    pub fn get_ollama_tools(&self) -> Vec<ToolInfo> {
+    /// Returns the tool definitions for all registered tools.
+    pub fn get_all_tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|t| t.tool_info.clone()).collect()
     }
 
-    /// Returns only read-only tools (ls, read, grep, glob) — no write/edit/run.
-    /// Also includes switch_mode so planning mode can escalate to agent mode.
-    pub fn get_readonly_tools(&self) -> Vec<ToolInfo> {
-        let readonly_names = [
-            "ls",
-            "read",
-            "grep",
-            "glob",
-            "git_status",
-            "git_diff",
-            "web_search",
-            "web_fetch",
-            "switch_mode",
-            "question",
-            "auto_compact",
-        ];
+    /// Returns the tool definitions appropriate for the given agent mode.
+    pub fn tools_for_mode(&self, mode: AgentMode) -> Vec<ToolDefinition> {
+        match mode {
+            AgentMode::Agent => self.get_all_tool_definitions(),
+            AgentMode::Casual => Vec::new(),
+            AgentMode::Planning => self
+                .tools
+                .iter()
+                .filter(|t| {
+                    t.category == ToolCategory::ReadOnly || t.category == ToolCategory::Signal
+                })
+                .map(|t| t.tool_info.clone())
+                .collect(),
+            AgentMode::Research => self
+                .tools
+                .iter()
+                .filter(|t| {
+                    t.category == ToolCategory::ReadOnly || t.category == ToolCategory::Signal
+                })
+                .map(|t| t.tool_info.clone())
+                .collect(),
+        }
+    }
+
+    /// Returns the category of a tool by name, or `None` if not found.
+    pub fn category_of(&self, tool_name: &str) -> Option<ToolCategory> {
         self.tools
             .iter()
-            .filter(|t| readonly_names.contains(&t.name()))
+            .find(|t| t.name() == tool_name)
+            .map(|t| t.category)
+    }
+
+    /// Returns `true` if the tool requires user approval before execution.
+    /// Destructive tools (write, edit, run) and signal tools (switch_mode,
+    /// question, auto_compact) require approval.
+    pub fn needs_approval(&self, tool_name: &str) -> bool {
+        self.category_of(tool_name)
+            .map(|c| c == ToolCategory::Destructive || c == ToolCategory::Signal)
+            .unwrap_or(false)
+    }
+
+    /// Returns only read-only tools (ls, read, grep, glob) — no write/edit/run.
+    /// Also includes signal tools so planning/research modes can escalate.
+    #[deprecated(note = "Use tools_for_mode() instead")]
+    pub fn get_readonly_tools(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .iter()
+            .filter(|t| t.category == ToolCategory::ReadOnly || t.category == ToolCategory::Signal)
             .map(|t| t.tool_info.clone())
             .collect()
     }
 
     /// Returns research tools (read-only + web search/fetch, no write/edit/run).
-    /// Also includes switch_mode so research mode can escalate to agent mode.
-    pub fn get_research_tools(&self) -> Vec<ToolInfo> {
-        let research_names = [
-            "web_search",
-            "web_fetch",
-            "ls",
-            "read",
-            "grep",
-            "glob",
-            "git_status",
-            "git_diff",
-            "switch_mode",
-            "question",
-            "auto_compact",
-        ];
+    /// Also includes signal tools so research mode can escalate.
+    #[deprecated(note = "Use tools_for_mode() instead")]
+    pub fn get_research_tools(&self) -> Vec<ToolDefinition> {
         self.tools
             .iter()
-            .filter(|t| research_names.contains(&t.name()))
+            .filter(|t| t.category == ToolCategory::ReadOnly || t.category == ToolCategory::Signal)
             .map(|t| t.tool_info.clone())
             .collect()
+    }
+
+    /// Returns all tool definitions.
+    #[deprecated(note = "Use get_all_tool_definitions() instead")]
+    pub fn get_ollama_tools(&self) -> Vec<ToolDefinition> {
+        self.get_all_tool_definitions()
     }
 
     pub async fn execute_tool_call(

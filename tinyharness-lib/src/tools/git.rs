@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use crate::define_tool;
-use crate::tools::tool::BoxFuture;
+use crate::tools::tool::{BoxFuture, ToolCategory};
 
 /// Check if a directory is inside a git repository.
 fn is_git_repo(path: &str) -> Result<(), String> {
@@ -154,6 +154,7 @@ pub fn git_diff_tool(args: HashMap<String, String>) -> BoxFuture<'static, String
 define_tool!(
     git_status_tool_entry, "git_status",
     "Show git repository status including current branch, staged changes, unstaged changes, and untracked files. Returns a formatted summary of the working tree state.",
+     ToolCategory::ReadOnly,
     required: [],
     optional: [
         ("path", "The directory to run git status in (defaults to current directory)", "."),
@@ -164,6 +165,7 @@ define_tool!(
 define_tool!(
     git_diff_tool_entry, "git_diff",
     "Show git differences between working directory and HEAD, staged changes, or a specific target commit/branch. Returns the full diff output.",
+     ToolCategory::ReadOnly,
     required: [],
     optional: [
         ("path", "The directory to run git diff in (defaults to current directory)", "."),

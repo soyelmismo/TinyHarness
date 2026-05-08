@@ -6,7 +6,6 @@ pub mod vllm;
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -45,19 +44,19 @@ pub struct TokenUsage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ToolInfo {
+pub struct ToolDefinition {
     #[serde(rename = "type")]
-    pub tool_type: ToolType,
-    pub function: ToolFunctionInfo,
+    pub tool_kind: ToolKind,
+    pub function: ToolFunctionDef,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ToolType {
+pub enum ToolKind {
     Function,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ToolFunctionInfo {
+pub struct ToolFunctionDef {
     pub name: String,
     pub description: String,
     pub parameters: schemars::Schema,
@@ -100,22 +99,23 @@ pub trait Provider {
 
     fn current_model(&self) -> Option<String>;
 
+    /// Send a chat request and return a receiver for streaming response chunks.
+    ///
+    /// The provider spawns a background task that streams `ChatMessageResponse` chunks
+    /// through the returned receiver. The caller drains the receiver until it receives
+    /// a chunk with `done: true`.
+    ///
+    /// Token usage, when available, is included in the final `ChatMessageResponse`
+    /// chunk (in the `usage` field). No separate method is needed to retrieve it.
     async fn chat(
         &mut self,
         messages: Vec<Message>,
-        prompt: String,
-        send: Sender<ChatMessageResponse>,
-        tools: Vec<ToolInfo>,
-    );
+        tools: Vec<ToolDefinition>,
+    ) -> tokio::sync::mpsc::Receiver<ChatMessageResponse>;
 
     /// Set the request timeout in seconds. Only meaningful for providers that use timeouts.
     fn set_timeout(&mut self, _timeout_secs: u64) {}
 
     /// Set the maximum number of retries. Only meaningful for providers that use retries.
     fn set_retries(&mut self, _max_retries: u32) {}
-
-    /// Get the token usage from the last request, if available.
-    fn last_token_usage(&self) -> Option<TokenUsage> {
-        None
-    }
 }

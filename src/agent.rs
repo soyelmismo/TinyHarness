@@ -5,12 +5,12 @@ use std::{
 };
 
 use rustyline::Editor;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 
 use tinyharness_lib::{
     config::Settings,
     mode::AgentMode,
-    provider::{ChatMessageResponse, Message, Provider, Role, TokenUsage, ToolCall, ToolInfo},
+    provider::{Message, Provider, Role, TokenUsage, ToolCall, ToolDefinition},
     session::Session,
     token::{
         ContextWindowSize, check_context_warning, estimate_conversation_tokens, estimate_tokens,
@@ -29,13 +29,11 @@ use crate::{
 pub async fn run_agent_loop(
     provider: Arc<Mutex<dyn Provider + Send + Sync>>,
     tool_manager: ToolManager,
-    ollama_tools: Vec<ToolInfo>,
+    all_tools: Vec<ToolDefinition>,
     messages: &mut Vec<Message>,
     dispatcher: &mut CommandDispatcher,
     session: &mut Session,
 ) -> Result<(), Box<dyn Error>> {
-    let (send, mut recv) = mpsc::channel::<ChatMessageResponse>(1024);
-
     let mut stdout = io::stdout();
     stdout.write_all(
         format!(
@@ -228,32 +226,25 @@ pub async fn run_agent_loop(
         // Auto-save: user message
         session.append_message(messages.last().unwrap());
 
-        // Drain any leftover messages in the channel
-        while recv.try_recv().is_ok() {}
-
         // auto_accept persists across all agent iterations within this user turn,
         // so that pressing 'a' once auto-accepts all subsequent tool calls.
         let mut auto_accept = false;
         let mut token_usage: Option<TokenUsage> = None;
 
         loop {
-            let messages_cloned = messages.clone();
-            let send_cloned = send.clone();
-            let provider_cloned = Arc::clone(&provider);
             // Filter tools based on current mode
             let tools = match dispatcher.current_mode {
-                AgentMode::Agent => ollama_tools.clone(),
-                AgentMode::Planning => tool_manager.get_readonly_tools(),
+                AgentMode::Agent => all_tools.clone(),
+                AgentMode::Planning => tool_manager.tools_for_mode(AgentMode::Planning),
                 AgentMode::Casual => Vec::new(),
-                AgentMode::Research => tool_manager.get_research_tools(),
+                AgentMode::Research => tool_manager.tools_for_mode(AgentMode::Research),
             };
-            let cloned_user_input = user_input.clone();
-            tokio::spawn(async move {
-                let mut provider = provider_cloned.lock().await;
-                provider
-                    .chat(messages_cloned, cloned_user_input, send_cloned, tools)
-                    .await;
-            });
+
+            // Call the provider — it returns a receiver for streaming chunks
+            let mut recv = {
+                let mut provider = provider.lock().await;
+                provider.chat(messages.clone(), tools).await
+            };
 
             let mut response_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -317,8 +308,6 @@ pub async fn run_agent_loop(
 
                     if answer.is_empty() || answer == "y" || answer == "yes" {
                         should_retry = true;
-                        // Drain any leftover messages in the channel before retrying
-                        while recv.try_recv().is_ok() {}
                         break;
                     } else if answer == "n" || answer == "no" {
                         should_retry = false;
@@ -474,10 +463,8 @@ async fn handle_tool_calls<W: Write>(
     });
     session.append_message(messages.last().unwrap());
 
-    let sensitive_tools = ["run", "write", "edit", "switch_mode"];
-
     for call in tool_calls {
-        let needs_confirmation = sensitive_tools.contains(&call.function.name.as_str());
+        let needs_confirmation = tool_manager.needs_approval(&call.function.name);
 
         // Confirmation step
         if !confirm_tool_call(call, needs_confirmation, auto_accept, stdout)? {

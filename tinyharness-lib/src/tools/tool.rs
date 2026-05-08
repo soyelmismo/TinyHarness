@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 use schemars::Schema;
 
-use crate::provider::ToolInfo;
+use crate::provider::ToolDefinition;
 
 /// Extract required string arguments from the tool arguments map.
 ///
@@ -29,16 +29,17 @@ macro_rules! extract_args {
     };
 }
 
-/// Define a tool entry function with its schema.
+/// Define a tool entry function with its schema and category.
 ///
 /// Generates a `pub fn <entry_fn>() -> Tool` that calls `make_tool` with the
-/// provided name, description, schema, and handler.
+/// provided name, description, category, schema, and handler.
 ///
 /// # Example
 /// ```ignore
 /// define_tool!(
 ///     write_tool_entry, "write",
 ///     "Write content to a file.",
+///     Destructive,
 ///     required: [("path", "The path"), ("content", "The content")],
 ///     optional: [("max_size", "Max size", "1024")],
 ///     handler: write_tool
@@ -47,7 +48,7 @@ macro_rules! extract_args {
 #[macro_export]
 macro_rules! define_tool {
     (
-        $entry_fn:ident, $name:expr, $description:expr,
+        $entry_fn:ident, $name:expr, $description:expr, $category:expr,
         required: [$(($req_name:expr, $req_desc:expr)),* $(,)?],
         optional: [$(($opt_name:expr, $opt_desc:expr, $opt_default:expr)),* $(,)?],
         handler: $handler:expr
@@ -56,6 +57,7 @@ macro_rules! define_tool {
             $crate::tools::tool::make_tool(
                 $name,
                 $description,
+                $category,
                 $crate::tools::tool::build_string_params_schema(
                     &[$(($req_name, $req_desc)),*],
                     &[$(($opt_name, $opt_desc, $opt_default)),*],
@@ -67,12 +69,12 @@ macro_rules! define_tool {
 
     // Variant with no optional params (common case)
     (
-        $entry_fn:ident, $name:expr, $description:expr,
+        $entry_fn:ident, $name:expr, $description:expr, $category:expr,
         required: [$(($req_name:expr, $req_desc:expr)),* $(,)?],
         handler: $handler:expr
     ) => {
         define_tool! {
-            $entry_fn, $name, $description,
+            $entry_fn, $name, $description, $category,
             required: [$(($req_name, $req_desc)),*],
             optional: [],
             handler: $handler
@@ -82,9 +84,25 @@ macro_rules! define_tool {
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Classifies a tool by its side effects, used to determine whether the tool
+/// requires user approval before execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCategory {
+    /// Safe to execute automatically — reads data without side effects
+    /// (ls, read, grep, glob, git_status, git_diff, web_search, web_fetch).
+    ReadOnly,
+    /// Modifies the filesystem or executes commands — needs user approval
+    /// (write, edit, run).
+    Destructive,
+    /// Returns a signal that the caller must interpret; not meant to be
+    /// executed as a normal tool (switch_mode, question, auto_compact).
+    Signal,
+}
+
 pub struct Tool {
     pub function: Box<dyn Fn(HashMap<String, String>) -> BoxFuture<'static, String> + Send + Sync>,
-    pub tool_info: ToolInfo,
+    pub tool_info: ToolDefinition,
+    pub category: ToolCategory,
 }
 
 impl Tool {
@@ -166,18 +184,20 @@ pub fn build_string_params_schema(
 pub fn make_tool(
     name: &str,
     description: &str,
+    category: ToolCategory,
     parameters: Schema,
     function: impl Fn(HashMap<String, String>) -> BoxFuture<'static, String> + Send + Sync + 'static,
 ) -> Tool {
     Tool {
         function: Box::new(function),
-        tool_info: ToolInfo {
-            tool_type: crate::provider::ToolType::Function,
-            function: crate::provider::ToolFunctionInfo {
+        tool_info: ToolDefinition {
+            tool_kind: crate::provider::ToolKind::Function,
+            function: crate::provider::ToolFunctionDef {
                 name: name.to_string(),
                 description: description.to_string(),
                 parameters,
             },
         },
+        category,
     }
 }

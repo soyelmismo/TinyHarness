@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::define_tool;
 use crate::extract_args;
-use crate::tools::tool::BoxFuture;
+use crate::tools::tool::{BoxFuture, ToolCategory};
 
 pub fn ls_tool(args: HashMap<String, String>) -> BoxFuture<'static, String> {
     Box::pin(async move {
@@ -46,6 +46,7 @@ pub fn ls_tool(args: HashMap<String, String>) -> BoxFuture<'static, String> {
 define_tool!(
     ls_tool_entry, "ls",
     "List directory contents. Returns a newline-separated list of files and directories in the specified path.",
+     ToolCategory::ReadOnly,
     required: [("path", "The directory path to list")],
     handler: ls_tool
 );

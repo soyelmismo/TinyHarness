@@ -190,7 +190,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut tool_manager = ToolManager::new();
     tool_manager.register_defaults();
 
-    let ollama_tools = tool_manager.get_ollama_tools();
+    let all_tools = tool_manager.get_all_tool_definitions();
 
     // Collect workspace context and build the system prompt with the saved mode
     let workspace_ctx = WorkspaceContext::collect();
@@ -266,7 +266,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     run_agent_loop(
         provider,
         tool_manager,
-        ollama_tools,
+        all_tools,
         &mut messages,
         &mut dispatcher,
         &mut session,

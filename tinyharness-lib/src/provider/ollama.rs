@@ -10,12 +10,11 @@ use ollama_rs::{
         parameters::ThinkType,
     },
 };
-use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
 
-use crate::provider::{ChatMessageResponse, Message, Provider, ToolInfo};
+use crate::provider::{ChatMessage, ChatMessageResponse, Message, Provider, ToolDefinition};
 
-use super::{ChatMessage, Role, ToolCall, ToolCallFunction};
+use super::{Role, ToolCall, ToolCallFunction};
 
 impl From<Message> for OllamaChatMessage {
     fn from(msg: Message) -> Self {
@@ -71,7 +70,7 @@ fn from_ollama_response(resp: OllamaChatMessageResponse) -> ChatMessageResponse 
     }
 }
 
-fn to_ollama_tool_info(ti: ToolInfo) -> ollama_rs::generation::tools::ToolInfo {
+fn to_ollama_tool_info(ti: ToolDefinition) -> ollama_rs::generation::tools::ToolInfo {
     ollama_rs::generation::tools::ToolInfo {
         tool_type: ollama_rs::generation::tools::ToolType::Function,
         function: ollama_rs::generation::tools::ToolFunctionInfo {
@@ -87,7 +86,6 @@ pub struct OllamaProvider {
     model: Option<String>,
     timeout_secs: u64,
     max_retries: u32,
-    last_usage: Option<super::TokenUsage>,
 }
 
 impl OllamaProvider {
@@ -98,7 +96,6 @@ impl OllamaProvider {
             model: None,
             timeout_secs,
             max_retries,
-            last_usage: None,
         }
     }
 }
@@ -137,20 +134,17 @@ impl Provider for OllamaProvider {
         self.max_retries = max_retries;
     }
 
-    fn last_token_usage(&self) -> Option<super::TokenUsage> {
-        self.last_usage.clone()
-    }
-
     async fn chat(
         &mut self,
         messages: Vec<Message>,
-        _prompt: String,
-        send: Sender<ChatMessageResponse>,
-        tools: Vec<ToolInfo>,
-    ) {
+        tools: Vec<ToolDefinition>,
+    ) -> tokio::sync::mpsc::Receiver<ChatMessageResponse> {
+        let (send, recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
+
         let model = self.model.clone().expect("Model not set");
         let timeout_secs = self.timeout_secs;
         let max_retries = self.max_retries;
+        let client = self.client.clone();
 
         let chat_messages: Vec<OllamaChatMessage> =
             messages.into_iter().map(|m| m.into()).collect();
@@ -165,25 +159,87 @@ impl Provider for OllamaProvider {
             request.think = None;
         }
 
-        // Retry loop with exponential backoff
-        let mut attempt = 0;
-        let mut stream = loop {
-            attempt += 1;
+        // Spawn the streaming work on a background task
+        tokio::spawn(async move {
+            // Retry loop with exponential backoff
+            let max_attempts = max_retries.max(1);
+            let mut stream = None;
 
-            let stream_result = tokio::time::timeout(
-                Duration::from_secs(timeout_secs),
-                self.client.send_chat_messages_stream(request.clone()),
-            )
-            .await;
+            for attempt in 1..=max_attempts {
+                let stream_result = tokio::time::timeout(
+                    Duration::from_secs(timeout_secs),
+                    client.send_chat_messages_stream(request.clone()),
+                )
+                .await;
 
-            match stream_result {
-                Ok(Ok(s)) => break s,
-                Ok(Err(e)) => {
-                    if attempt >= max_retries {
+                match stream_result {
+                    Ok(Ok(s)) => {
+                        stream = Some(s);
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        if attempt >= max_attempts {
+                            let _ = send
+                                .send(ChatMessageResponse {
+                                    message: ChatMessage {
+                                        content: format!("Error after {} retries: {}", attempt, e),
+                                        tool_calls: vec![],
+                                    },
+                                    done: true,
+                                    is_error: true,
+                                    usage: None,
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                    Err(_) => {
+                        if attempt >= max_attempts {
+                            let _ = send
+                                .send(ChatMessageResponse {
+                                    message: ChatMessage {
+                                        content: format!(
+                                            "Error: Request timed out after {} seconds ({} retries)",
+                                            timeout_secs, attempt
+                                        ),
+                                        tool_calls: vec![],
+                                    },
+                                    done: true,
+                                    is_error: true,
+                                    usage: None,
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                }
+
+                // Exponential backoff: 1s, 2s, 4s, ...
+                let backoff = Duration::from_secs(1 << (attempt - 1));
+                tokio::time::sleep(backoff).await;
+            }
+
+            let Some(mut stream) = stream else {
+                return;
+            };
+
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(res) => {
+                        let ours = from_ollama_response(res);
+                        let is_done = ours.done;
+                        if send.send(ours).await.is_err() {
+                            break;
+                        }
+                        if is_done {
+                            break;
+                        }
+                    }
+                    Err(_) => {
                         let _ = send
                             .send(ChatMessageResponse {
                                 message: ChatMessage {
-                                    content: format!("Error after {} retries: {}", attempt, e),
+                                    content: "Stream error: connection to Ollama was lost.".into(),
                                     tool_calls: vec![],
                                 },
                                 done: true,
@@ -191,67 +247,12 @@ impl Provider for OllamaProvider {
                                 usage: None,
                             })
                             .await;
-                        return;
-                    }
-                }
-                Err(_) => {
-                    if attempt >= max_retries {
-                        let _ = send
-                            .send(ChatMessageResponse {
-                                message: ChatMessage {
-                                    content: format!(
-                                        "Error: Request timed out after {} seconds ({} retries)",
-                                        timeout_secs, attempt
-                                    ),
-                                    tool_calls: vec![],
-                                },
-                                done: true,
-                                is_error: true,
-                                usage: None,
-                            })
-                            .await;
-                        return;
-                    }
-                }
-            }
-
-            // Exponential backoff: 1s, 2s, 4s, ...
-            let backoff = Duration::from_secs(1 << (attempt - 1));
-            tokio::time::sleep(backoff).await;
-        };
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(res) => {
-                    let ours = from_ollama_response(res);
-                    let is_done = ours.done;
-                    // Store usage info from the final response
-                    if is_done && let Some(usage) = &ours.usage {
-                        self.last_usage = Some(usage.clone());
-                    }
-                    if send.send(ours).await.is_err() {
-                        break;
-                    }
-                    if is_done {
                         break;
                     }
                 }
-                Err(_) => {
-                    // Stream error from Ollama — send it to the agent loop before terminating
-                    let _ = send
-                        .send(ChatMessageResponse {
-                            message: ChatMessage {
-                                content: "Stream error: connection to Ollama was lost.".into(),
-                                tool_calls: vec![],
-                            },
-                            done: true,
-                            is_error: true,
-                            usage: None,
-                        })
-                        .await;
-                    break;
-                }
             }
-        }
+        });
+
+        recv
     }
 }

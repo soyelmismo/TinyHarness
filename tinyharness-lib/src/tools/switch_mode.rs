@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::define_tool;
 use crate::extract_args;
 use crate::mode::AgentMode;
-use crate::tools::tool::BoxFuture;
+use crate::tools::tool::{BoxFuture, ToolCategory};
 
 pub fn switch_mode_tool(args: HashMap<String, String>) -> BoxFuture<'static, String> {
     Box::pin(async move {
@@ -30,6 +30,7 @@ pub fn switch_mode_tool(args: HashMap<String, String>) -> BoxFuture<'static, Str
 define_tool!(
     switch_mode_tool_entry, "switch_mode",
     "Switch the assistant to a different operating mode. Use 'planning' to analyze and plan without making changes. Use 'agent' to write code and execute commands (escalate from planning). Use 'research' to search the web. Use 'casual' for general conversation.",
+     ToolCategory::Signal,
     required: [("mode", "The mode to switch to: 'casual', 'planning', 'agent', or 'research'")],
     handler: switch_mode_tool
 );

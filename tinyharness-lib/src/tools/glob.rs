@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::define_tool;
 use crate::extract_args;
-use crate::tools::tool::BoxFuture;
+use crate::tools::tool::{BoxFuture, ToolCategory};
 
 pub fn glob_tool(args: HashMap<String, String>) -> BoxFuture<'static, String> {
     Box::pin(async move {
@@ -58,6 +58,7 @@ pub fn glob_tool(args: HashMap<String, String>) -> BoxFuture<'static, String> {
 define_tool!(
     glob_tool_entry, "glob",
     "Find files by glob pattern. Supports patterns like '**/*.rs', 'src/**/*.toml', '**/Cargo.toml'. Returns sorted results. Use 'max_results' to limit output (default 100).",
+     ToolCategory::ReadOnly,
     required: [("pattern", "The glob pattern to search for (e.g. '**/*.rs', '**/Cargo.toml')")],
     optional: [
         ("max_results", "Maximum number of results to return (default: 100)", "100"),
