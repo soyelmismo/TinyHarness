@@ -1,6 +1,9 @@
 use rustyline::{
-    Completer, Helper, Highlighter, Hinter, completion::Completer, highlight::Highlighter,
-    hint::Hinter, validate::Validator,
+    Completer, Helper, Highlighter, Hinter,
+    completion::Completer,
+    highlight::Highlighter,
+    hint::Hinter,
+    validate::{ValidationContext, ValidationResult, Validator},
 };
 
 use crate::commands::CommandDispatcher;
@@ -16,7 +19,35 @@ pub struct CommandHelper {
     highlighter: CommandHighlighter,
 }
 
-impl Validator for CommandHelper {}
+impl Validator for CommandHelper {
+    fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
+        let input = ctx.input();
+
+        // Check if input ends with backslash (continuation character)
+        let trimmed = input.trim_end();
+        if trimmed.ends_with('\\') {
+            // Incomplete - needs more input
+            return Ok(ValidationResult::Incomplete);
+        }
+
+        // Check for unclosed code fences (```)
+        let fence_count = input.matches("```").count();
+        if fence_count % 2 == 1 {
+            // Unclosed code fence - needs more input
+            return Ok(ValidationResult::Incomplete);
+        }
+
+        // Check for unclosed backtick code spans
+        let backtick_count = input.matches('`').count();
+        if backtick_count % 2 == 1 {
+            // Unclosed backtick - needs more input
+            return Ok(ValidationResult::Incomplete);
+        }
+
+        // Input is complete
+        Ok(ValidationResult::Valid(None))
+    }
+}
 
 impl Default for CommandHelper {
     fn default() -> Self {

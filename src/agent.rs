@@ -30,6 +30,89 @@ use crate::{
     ui::input::CommandHelper,
 };
 
+/// Read input from the user with support for multi-line continuation.
+///
+/// Uses rustyline's validator to detect incomplete input (trailing backslash,
+/// unclosed code fences, etc.) and shows a continuation prompt for additional lines.
+///
+/// Returns:
+/// - `Ok(Some(String))` - Complete input received
+/// - `Ok(None)` - EOF (Ctrl+D) or unrecoverable error
+/// - `Err(...)` - Read error
+fn read_multiline_input<W: Write>(
+    rl: &mut Editor<CommandHelper, rustyline::history::DefaultHistory>,
+    prompt: &str,
+    continuation_prompt: &str,
+    interrupted: &Arc<AtomicBool>,
+    stdout: &mut W,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let mut input = String::new();
+    let mut is_first_line = true;
+
+    loop {
+        let current_prompt = if is_first_line {
+            prompt
+        } else {
+            continuation_prompt
+        };
+
+        let readline = rl.readline(current_prompt);
+
+        match readline {
+            Ok(line) => {
+                if is_first_line {
+                    input = line;
+                } else {
+                    // Append continuation line with newline
+                    input.push('\n');
+                    input.push_str(&line);
+                }
+
+                // Check if the validator considers this complete
+                // We need to manually check since rustyline handles this internally
+                let trimmed = input.trim_end();
+                let ends_with_backslash = trimmed.ends_with('\\');
+                let fence_count = input.matches("```").count();
+                let has_unclosed_fence = fence_count % 2 == 1;
+                let backtick_count = input.matches('`').count();
+                let has_unclosed_backtick = backtick_count % 2 == 1;
+
+                if ends_with_backslash || has_unclosed_fence || has_unclosed_backtick {
+                    // Incomplete - continue reading
+                    is_first_line = false;
+                    continue;
+                }
+
+                // Complete input
+                return Ok(Some(input));
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                // Ctrl+C during input — just clear the flag (set by our handler)
+                // and show a hint. Don't exit the program.
+                interrupted.store(false, Ordering::SeqCst);
+                stdout.write_all("\n".as_bytes())?;
+                stdout.write_all(
+                    format!(
+                        "{}Use {}/exit{} or {}{}Ctrl+D{} to exit.\n",
+                        GRAY, BLUE, GRAY, GRAY, BOLD, RESET
+                    )
+                    .as_bytes(),
+                )?;
+                stdout.flush()?;
+                return Ok(None); // Return None to continue the main loop
+            }
+            Err(rustyline::error::ReadlineError::Eof) => {
+                stdout.write_all("\n".as_bytes())?;
+                return Ok(None); // EOF - signal to exit
+            }
+            Err(err) => {
+                eprintln!("{}Error reading input: {}{}", RED, err, RESET);
+                return Ok(None);
+            }
+        }
+    }
+}
+
 pub async fn run_agent_loop(
     provider: Arc<Mutex<dyn Provider + Send + Sync>>,
     tool_manager: ToolManager,
@@ -85,6 +168,15 @@ pub async fn run_agent_loop(
     rl.set_helper(Some(helper));
     rl.load_history(&history_path).ok();
 
+    // Configure multi-line input:
+    // - Ctrl+J inserts a newline
+    // - Enter submits the input
+    // - Validator detects incomplete input (trailing \, unclosed fences) and shows continuation prompt
+    rl.bind_sequence(
+        rustyline::KeyEvent(rustyline::KeyCode::Char('j'), rustyline::Modifiers::CTRL),
+        rustyline::EventHandler::Simple(rustyline::Cmd::Newline),
+    );
+
     loop {
         // Clear any stale interrupt flag from a previous turn.
         // The flag may be set from Ctrl+C during rustyline's blocking read,
@@ -103,40 +195,31 @@ pub async fn run_agent_loop(
             "{}[{}]{} {}{}> {}{}",
             BOLD, mode_label, RESET, GRAY, context_info, BLUE, RESET
         );
-        let readline = rl.readline(&prompt);
-        let user_input = match readline {
-            Ok(line) => {
-                let trimmed = line.trim().to_string();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                rl.add_history_entry(&trimmed)?;
-                trimmed
-            }
-            Err(rustyline::error::ReadlineError::Interrupted) => {
-                // Ctrl+C during input — just clear the flag (set by our handler)
-                // and show a hint. Don't exit the program.
-                interrupted.store(false, Ordering::SeqCst);
-                stdout.write_all("\n".as_bytes())?;
-                stdout.write_all(
-                    format!(
-                        "{}Use {}/exit{} or {}{}Ctrl+D{} to exit.\n",
-                        GRAY, BLUE, GRAY, GRAY, BOLD, RESET
-                    )
-                    .as_bytes(),
-                )?;
-                stdout.flush()?;
-                continue;
-            }
-            Err(rustyline::error::ReadlineError::Eof) => {
-                stdout.write_all("\n".as_bytes())?;
-                break;
-            }
-            Err(err) => {
-                eprintln!("{}Error reading input: {}{}", RED, err, RESET);
-                break;
-            }
-        };
+        let continuation_prompt = format!(
+            "{}[{}]{} {}{}...> {}{}",
+            BOLD, mode_label, RESET, GRAY, context_info, BLUE, RESET
+        );
+
+        // Read input with support for multi-line continuation
+        let user_input = read_multiline_input(
+            &mut rl,
+            &prompt,
+            &continuation_prompt,
+            interrupted,
+            &mut stdout,
+        )?;
+
+        if user_input.is_none() {
+            // EOF or error - exit
+            break;
+        }
+
+        let user_input = user_input.unwrap();
+        let trimmed = user_input.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        rl.add_history_entry(&trimmed)?;
 
         if user_input.starts_with('/') {
             match CommandDispatcher::parse(&user_input) {
