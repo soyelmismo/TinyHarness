@@ -386,12 +386,18 @@ impl CommandDispatcher {
             }
             Command::Model(name) => {
                 if name.is_empty() {
+                    // No argument — list available models and show current
                     let provider = self.provider.lock().await;
-                    match provider.current_model() {
-                        Some(model) => {
-                            println!("{}Current model: {}{}{}", BOLD, BLUE, model, RESET)
-                        }
-                        None => println!("{}No model selected.{}", ORANGE, RESET),
+                    let current = provider.current_model();
+                    
+                    // List models
+                    models::execute_list(&*provider).await?;
+                    
+                    // Show current selection
+                    if let Some(model) = current {
+                        println!("{}Current model: {}{}{}{}", BOLD, GREEN, model, RESET, RESET);
+                    } else {
+                        println!("{}No model currently selected.{}", ORANGE, RESET);
                     }
                     return Ok(CommandResult::Ok);
                 }
