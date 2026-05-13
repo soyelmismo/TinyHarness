@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use tinyharness_lib::config::load_settings;
 
 use crate::style::*;
@@ -120,31 +122,61 @@ fn execute_summary(settings: &tinyharness_lib::config::Settings) {
 fn execute_all(settings: &tinyharness_lib::config::Settings) {
     let safe_commands = settings.get_safe_commands();
     let denied_commands = settings.get_denied_commands();
+    let using_defaults = settings.safe_command_prefixes.is_none();
+
+    // Compute default set for markers
+    let defaults = tinyharness_lib::config::get_default_safe_commands();
+    let default_set: HashSet<&str> = defaults.iter().map(|s| s.as_str()).collect();
+    let custom_count = if using_defaults {
+        0
+    } else {
+        safe_commands
+            .iter()
+            .filter(|c| !default_set.contains(c.as_str()))
+            .count()
+    };
 
     println!();
-    println!(
-        "{}╭─ All Safe Commands ({} configured) ───────────╮{}",
-        BOLD,
-        safe_commands.len(),
-        RESET
-    );
+    if using_defaults {
+        println!(
+            "{}╭─ All Safe Commands ({} defaults) ────────────╮{}",
+            BOLD,
+            safe_commands.len(),
+            RESET
+        );
+    } else {
+        println!(
+            "{}╭─ All Safe Commands ({} configured, {} custom) ─╮{}",
+            BOLD,
+            safe_commands.len(),
+            custom_count,
+            RESET
+        );
+    }
 
-    // Display 3 commands per row
+    // Build markers: · for defaults, + for custom
     let cmds: Vec<&str> = safe_commands.iter().map(|s| s.as_str()).collect();
-    let chunks = cmds.chunks(3);
-
-    for row in chunks {
-        let mut line = String::new();
-        for (i, cmd) in row.iter().enumerate() {
-            if i > 0 {
-                // Pad between columns — 20 chars wide per column
-                let prev = row[i - 1];
-                let padding = 20_usize.saturating_sub(prev.len());
-                line.push_str(&" ".repeat(padding));
+    let markers: Vec<char> = safe_commands
+        .iter()
+        .map(|c| {
+            if default_set.contains(c.as_str()) {
+                '·'
+            } else {
+                '+'
             }
-            line.push_str(&format!("{}{}{}", CYAN, cmd, RESET));
-        }
-        println!("{}│{}   {}", BOLD, RESET, line);
+        })
+        .collect();
+
+    let rows = crate::commands::command::format_command_rows(&cmds, &markers);
+    for row in &rows {
+        println!("{}│{}   {}", BOLD, RESET, row);
+    }
+
+    if !using_defaults {
+        println!(
+            "{}│{}   {}· {}default{}  {}+ {}custom{}",
+            BOLD, RESET, GRAY, RESET, GRAY, GREEN, RESET, RESET
+        );
     }
 
     println!(
@@ -153,6 +185,9 @@ fn execute_all(settings: &tinyharness_lib::config::Settings) {
     );
 
     if !denied_commands.is_empty() {
+        let denied_refs: Vec<&str> = denied_commands.iter().map(|s| s.as_str()).collect();
+        let denied_rows = crate::commands::command::format_denied_command_rows(&denied_refs);
+
         println!();
         println!(
             "{}╭─ Always-Deny Commands ({} configured) ────────╮{}",
@@ -160,8 +195,8 @@ fn execute_all(settings: &tinyharness_lib::config::Settings) {
             denied_commands.len(),
             RESET
         );
-        for cmd in &denied_commands {
-            println!("{}│{}   {}✕ {} {}{}", BOLD, RESET, RED, cmd, RESET, RESET);
+        for row in &denied_rows {
+            println!("{}│{}   {}", BOLD, RESET, row);
         }
         println!(
             "{}╰───────────────────────────────────────────────╯{}",

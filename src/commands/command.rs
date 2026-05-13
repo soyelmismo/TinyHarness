@@ -1,6 +1,21 @@
+use std::collections::HashSet;
+
 use tinyharness_lib::config::{get_default_safe_commands, load_settings, save_settings};
 
 use crate::style::*;
+
+/// Check if a command prefix would match any command in the safe list.
+fn matches_safe_prefix(cmd: &str, safe_commands: &[String]) -> bool {
+    for prefix in safe_commands {
+        if cmd.starts_with(prefix) {
+            let rest = &cmd[prefix.len()..];
+            if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('=') {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 pub fn execute_add(cmd: &str) {
     if cmd.is_empty() {
@@ -20,6 +35,15 @@ pub fn execute_add(cmd: &str) {
             ORANGE, cmd, RESET
         );
         return;
+    }
+
+    // Warn if the command is also on the deny list
+    let denied = settings.get_denied_commands();
+    if denied.contains(&cmd.to_string()) {
+        println!(
+            "{}Note:{} '{}' is on the deny list. It will still be blocked until removed with {}/command undeny {}{}",
+            YELLOW, RESET, cmd, BOLD, cmd, RESET
+        );
     }
 
     commands.push(cmd.to_string());
@@ -75,7 +99,7 @@ pub fn execute_deny(cmd: &str) {
     }
 
     let mut settings = load_settings();
-    let mut denied = settings.get_denied_commands();
+    let denied = settings.get_denied_commands();
 
     if denied.contains(&cmd.to_string()) {
         println!(
@@ -85,6 +109,22 @@ pub fn execute_deny(cmd: &str) {
         return;
     }
 
+    // Warn if the command is currently auto-accepted (on safe list)
+    let safe_commands = settings.get_safe_commands();
+    if matches_safe_prefix(cmd, &safe_commands) {
+        println!(
+            "{}Note:{} '{}' is currently auto-accepted. Denying will override it — it will always require confirmation.{}",
+            YELLOW, RESET, cmd, RESET
+        );
+    } else {
+        // Warn if the command isn't on the safe list anyway
+        println!(
+            "{}Note:{} '{}' is not currently auto-accepted, so denying it has no practical effect.{}",
+            GRAY, RESET, cmd, RESET
+        );
+    }
+
+    let mut denied = denied; // move out of &settings
     denied.push(cmd.to_string());
     settings.denied_command_prefixes = Some(denied);
     save_settings(&settings);
@@ -125,11 +165,65 @@ pub fn execute_undeny(cmd: &str) {
     }
 }
 
+/// Format commands in a 3-per-row grid, with an optional marker prefix
+/// for each command (e.g. `+` for custom, `·` for default).
+pub fn format_command_rows(cmds: &[&str], markers: &[char]) -> Vec<String> {
+    let mut rows = Vec::new();
+    for row in cmds.chunks(3) {
+        let mut line = String::new();
+        for (i, cmd) in row.iter().enumerate() {
+            if i > 0 {
+                let prev = row[i - 1];
+                // Account for the marker character + space before prev
+                let prev_width = prev.len() + 2; // "marker cmd" = cmd.len() + 2
+                let padding = 22_usize.saturating_sub(prev_width);
+                line.push_str(&" ".repeat(padding));
+            }
+            let marker = markers.get(i).copied().unwrap_or('·');
+            line.push_str(&format!("{}{} {}{}", marker, CYAN, cmd, RESET));
+        }
+        rows.push(line);
+    }
+    rows
+}
+
+/// Format commands in a 3-per-row grid with ✕ prefix for denied commands.
+pub fn format_denied_command_rows(cmds: &[&str]) -> Vec<String> {
+    let mut rows = Vec::new();
+    for row in cmds.chunks(3) {
+        let mut line = String::new();
+        for (i, cmd) in row.iter().enumerate() {
+            if i > 0 {
+                let prev = row[i - 1];
+                let prev_width = prev.len() + 2; // "✕ cmd" = cmd.len() + 2
+                let padding = 22_usize.saturating_sub(prev_width);
+                line.push_str(&" ".repeat(padding));
+            }
+            line.push_str(&format!("{}✕ {}{}{}", RED, cmd, RESET, RESET));
+        }
+        rows.push(line);
+    }
+    rows
+}
+
 pub fn execute_list() {
     let settings = load_settings();
-    let commands = settings.get_safe_commands();
+    let safe_commands = settings.get_safe_commands();
     let denied = settings.get_denied_commands();
     let using_defaults = settings.safe_command_prefixes.is_none();
+
+    // Compute which safe commands are defaults vs custom
+    let defaults = get_default_safe_commands();
+    let default_set: HashSet<&str> = defaults.iter().map(|s| s.as_str()).collect();
+
+    let custom_count = if using_defaults {
+        0
+    } else {
+        safe_commands
+            .iter()
+            .filter(|c| !default_set.contains(c.as_str()))
+            .count()
+    };
 
     println!();
     println!(
@@ -143,34 +237,48 @@ pub fn execute_list() {
             RESET,
             GRAY,
             RESET,
-            commands.len(),
+            safe_commands.len(),
             RESET
         );
     } else {
         println!(
-            "{}│{} {}{}{} commands configured{}",
+            "{}│{} {}{}{} configured ({} custom){}",
             BOLD,
             RESET,
             BLUE,
-            commands.len(),
+            safe_commands.len(),
             RESET,
+            custom_count,
             RESET
         );
     }
 
-    // Display 3 commands per row
-    let cmds: Vec<&str> = commands.iter().map(|s| s.as_str()).collect();
-    for row in cmds.chunks(3) {
-        let mut line = String::new();
-        for (i, cmd) in row.iter().enumerate() {
-            if i > 0 {
-                let prev = row[i - 1];
-                let padding = 20_usize.saturating_sub(prev.len());
-                line.push_str(&" ".repeat(padding));
+    // Build markers: · for defaults, + for custom
+    let cmds: Vec<&str> = safe_commands.iter().map(|s| s.as_str()).collect();
+    let markers: Vec<char> = safe_commands
+        .iter()
+        .map(|c| {
+            if default_set.contains(c.as_str()) {
+                '·'
+            } else {
+                '+'
             }
-            line.push_str(&format!("{}{}{}", CYAN, cmd, RESET));
-        }
-        println!("{}│{}   {}", BOLD, RESET, line);
+        })
+        .collect();
+    let cmd_refs: Vec<&str> = cmds.to_vec();
+
+    // Format and print rows
+    let rows = format_command_rows(&cmd_refs, &markers);
+    for row in &rows {
+        println!("{}│{}   {}", BOLD, RESET, row);
+    }
+
+    // Legend
+    if !using_defaults {
+        println!(
+            "{}│{}   {}· {}default{}  {}+ {}custom{}",
+            BOLD, RESET, GRAY, RESET, GRAY, GREEN, RESET, RESET
+        );
     }
 
     println!(
@@ -179,6 +287,9 @@ pub fn execute_list() {
     );
 
     if !denied.is_empty() {
+        let denied_refs: Vec<&str> = denied.iter().map(|s| s.as_str()).collect();
+        let denied_rows = format_denied_command_rows(&denied_refs);
+
         println!();
         println!(
             "{}╭─ Always-Deny Commands ──────────────────────╮{}",
@@ -193,8 +304,8 @@ pub fn execute_list() {
             RESET,
             RESET
         );
-        for cmd in &denied {
-            println!("{}│{}   {}✕ {} {}{}", BOLD, RESET, RED, cmd, RESET, RESET);
+        for row in &denied_rows {
+            println!("{}│{}   {}", BOLD, RESET, row);
         }
         println!(
             "{}╰──────────────────────────────────────────────╯{}",
