@@ -50,6 +50,13 @@ pub struct Settings {
     pub ollama_max_retries: u32,
     /// Context limit for warning calculations only (default: None, uses model default)
     pub context_limit: Option<u32>,
+    /// Automatically accept safe read-only commands in the run tool (default: true)
+    pub auto_accept_safe_commands: bool,
+    /// List of command prefixes considered safe for auto-accept (default: see get_default_safe_commands)
+    pub safe_command_prefixes: Option<Vec<String>>,
+    /// List of command prefixes that are always denied auto-accept, even if they
+    /// match a safe prefix. Takes priority over the safe list. (default: empty)
+    pub denied_command_prefixes: Option<Vec<String>>,
 }
 
 impl Default for Settings {
@@ -62,7 +69,78 @@ impl Default for Settings {
             ollama_timeout_secs: 5,
             ollama_max_retries: 3,
             context_limit: None,
+            auto_accept_safe_commands: true,
+            safe_command_prefixes: None,
+            denied_command_prefixes: None,
         }
+    }
+}
+
+/// Returns the default list of safe command prefixes.
+/// These are read-only commands that don't modify the filesystem.
+pub fn get_default_safe_commands() -> Vec<String> {
+    vec![
+        "cd".to_string(),
+        "ls".to_string(),
+        "grep".to_string(),
+        "glob".to_string(),
+        "find".to_string(),
+        "cat".to_string(),
+        "head".to_string(),
+        "tail".to_string(),
+        "wc".to_string(),
+        "pwd".to_string(),
+        "echo".to_string(),
+        "printf".to_string(),
+        "tree".to_string(),
+        "file".to_string(),
+        "stat".to_string(),
+        "du".to_string(),
+        "df".to_string(),
+        "free".to_string(),
+        "uptime".to_string(),
+        "whoami".to_string(),
+        "hostname".to_string(),
+        "uname".to_string(),
+        "date".to_string(),
+        "cal".to_string(),
+        "ps".to_string(),
+        "env".to_string(),
+        "printenv".to_string(),
+        "which".to_string(),
+        "whereis".to_string(),
+        "type".to_string(),
+        "git status".to_string(),
+        "git diff".to_string(),
+        "git log".to_string(),
+        "git show".to_string(),
+        "git branch".to_string(),
+        "git remote".to_string(),
+        "git tag".to_string(),
+        "git describe".to_string(),
+        "git rev-parse".to_string(),
+        "cargo tree".to_string(),
+        "cargo metadata".to_string(),
+        "cargo doc".to_string(),
+        "rustc --version".to_string(),
+        "cargo --version".to_string(),
+    ]
+}
+
+impl Settings {
+    /// Returns the list of safe command prefixes, using defaults if not configured.
+    pub fn get_safe_commands(&self) -> Vec<String> {
+        self.safe_command_prefixes
+            .clone()
+            .unwrap_or_else(get_default_safe_commands)
+    }
+
+    /// Returns the list of always-denied command prefixes.
+    /// These take priority over the safe list — if a command matches both
+    /// a safe prefix and a denied prefix, it is denied.
+    /// Defaults to an empty list (nothing denied).
+    pub fn get_denied_commands(&self) -> Vec<String> {
+        self.denied_command_prefixes.clone().unwrap_or_default()
     }
 }
 

@@ -89,7 +89,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {
     /// Safe to execute automatically — reads data without side effects
-    /// (ls, read, grep, glob, git_status, git_diff, web_search, web_fetch).
+    /// (ls, read, grep, glob, web_search, web_fetch).
     ReadOnly,
     /// Modifies the filesystem or executes commands — needs user approval
     /// (write, edit, run).

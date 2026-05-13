@@ -1,6 +1,5 @@
 pub mod auto_compact;
 pub mod edit;
-pub mod git;
 pub mod glob;
 pub mod grep;
 pub mod ls;
@@ -73,8 +72,6 @@ impl ToolManager {
             crate::tools::grep::grep_tool_entry,
             crate::tools::run::run_tool_entry,
             crate::tools::glob::glob_tool_entry,
-            crate::tools::git::git_status_tool_entry,
-            crate::tools::git::git_diff_tool_entry,
             crate::tools::web_search::web_search_tool_entry,
             crate::tools::web_search::web_fetch_tool_entry,
             crate::tools::switch_mode::switch_mode_tool_entry,

@@ -1,5 +1,6 @@
 pub mod apikey;
 pub mod clear;
+pub mod command;
 pub mod compact;
 pub mod context;
 pub mod exit;
@@ -37,7 +38,7 @@ pub enum Command {
     Sessions,
     SessionLoad(String),
     Rename(String),
-    Settings,
+    Settings(Option<String>),
     ApiKey(String),
     Compact(String),
     Add(String),
@@ -49,6 +50,14 @@ pub enum Command {
     Timeout(String),
     Retries(String),
     ContextLimit(String),
+    AutoAccept(String),
+    CommandAdd(String),
+    CommandRemove(String),
+    CommandDeny(String),
+    CommandUndeny(String),
+    CommandList,
+    CommandReset,
+    CommandResetDeny,
 }
 
 /// Result of dispatching a command.
@@ -161,7 +170,7 @@ impl CommandDispatcher {
             "/sessions" => Some(Command::Sessions),
             "/session" => Some(Command::SessionLoad(arg.unwrap_or_default())),
             "/rename" => Some(Command::Rename(arg.unwrap_or_default())),
-            "/settings" => Some(Command::Settings),
+            "/settings" => Some(Command::Settings(arg)),
             "/apikey" => {
                 let arg = arg.unwrap_or_default();
                 Some(Command::ApiKey(arg))
@@ -176,6 +185,35 @@ impl CommandDispatcher {
             "/timeout" => Some(Command::Timeout(arg.unwrap_or_default())),
             "/retries" => Some(Command::Retries(arg.unwrap_or_default())),
             "/contextlimit" => Some(Command::ContextLimit(arg.unwrap_or_default())),
+            "/autoaccept" => Some(Command::AutoAccept(arg.unwrap_or_default())),
+            "/command" => {
+                let arg = arg.unwrap_or_default();
+                if arg.is_empty() {
+                    // No subcommand — list all commands
+                    Some(Command::CommandList)
+                } else {
+                    // Split into subcommand + rest (e.g. "add docker" or "rm \"git stash\"")
+                    let sub_parts: Vec<&str> = arg.splitn(2, ' ').collect();
+                    let sub = sub_parts[0].to_lowercase();
+                    let cmd_arg = sub_parts
+                        .get(1)
+                        .map(|s| s.trim())
+                        .unwrap_or("")
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string();
+                    match sub.as_str() {
+                        "add" => Some(Command::CommandAdd(cmd_arg)),
+                        "rm" | "remove" => Some(Command::CommandRemove(cmd_arg)),
+                        "deny" => Some(Command::CommandDeny(cmd_arg)),
+                        "undeny" | "allow" => Some(Command::CommandUndeny(cmd_arg)),
+                        "list" | "ls" => Some(Command::CommandList),
+                        "reset" => Some(Command::CommandReset),
+                        "resetdeny" => Some(Command::CommandResetDeny),
+                        _ => Some(Command::CommandList),
+                    }
+                }
+            }
             _ => None,
         }
     }
@@ -209,6 +247,8 @@ impl CommandDispatcher {
             "/timeout",
             "/retries",
             "/contextlimit",
+            "/autoaccept",
+            "/command",
         ]
     }
 
@@ -245,8 +285,8 @@ impl CommandDispatcher {
             ),
             ("/rename <name>", "Rename the current session"),
             (
-                "/settings",
-                "Show current settings (provider, model, mode, timeout, retries)",
+                "/settings [all]",
+                "Show current settings. Use 'all' to list all safe commands.",
             ),
             (
                 "/apikey [key]",
@@ -283,6 +323,29 @@ impl CommandDispatcher {
                 "/contextlimit [tokens]",
                 "Show or set the context limit for warning calculations (default: model default)",
             ),
+            (
+                "/autoaccept [on|off]",
+                "Show or toggle auto-accept for safe read-only commands (default: on)",
+            ),
+            ("/command [list]", "Show auto-accepted and denied commands"),
+            (
+                "/command add <cmd>",
+                "Add a command to the auto-accept list",
+            ),
+            (
+                "/command rm <cmd>",
+                "Remove a command from the auto-accept list",
+            ),
+            (
+                "/command deny <cmd>",
+                "Always require confirmation for a command (even if safe)",
+            ),
+            (
+                "/command undeny <cmd>",
+                "Remove a command from the always-deny list",
+            ),
+            ("/command reset", "Reset auto-accepted commands to defaults"),
+            ("/command resetdeny", "Clear the always-deny list"),
         ]
     }
 
@@ -374,8 +437,8 @@ impl CommandDispatcher {
                 }
                 Ok(CommandResult::RenameSession(name))
             }
-            Command::Settings => {
-                settings::execute();
+            Command::Settings(arg) => {
+                settings::execute(arg.as_deref());
                 Ok(CommandResult::Ok)
             }
             Command::ApiKey(arg) => {
@@ -541,6 +604,74 @@ impl CommandDispatcher {
                         arg
                     )),
                 }
+            }
+            Command::AutoAccept(arg) => {
+                if arg.is_empty() {
+                    let settings = load_settings();
+                    let status = if settings.auto_accept_safe_commands {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    let color = if settings.auto_accept_safe_commands {
+                        GREEN
+                    } else {
+                        ORANGE
+                    };
+                    println!(
+                        "{}Auto-accept safe commands: {}{}{}{}",
+                        BOLD, color, status, RESET, RESET
+                    );
+                    return Ok(CommandResult::Ok);
+                }
+                let new_value = match arg.to_lowercase().as_str() {
+                    "on" | "true" | "yes" | "1" => true,
+                    "off" | "false" | "no" | "0" => false,
+                    _ => {
+                        return Err(
+                            "Invalid value. Use 'on' or 'off', e.g. /autoaccept on".to_string()
+                        );
+                    }
+                };
+                // Update settings
+                let mut settings = load_settings();
+                settings.auto_accept_safe_commands = new_value;
+                save_settings(&settings);
+                let status = if new_value { "enabled" } else { "disabled" };
+                let color = if new_value { GREEN } else { ORANGE };
+                println!(
+                    "{}Auto-accept safe commands set to {}{}{}{}",
+                    BOLD, color, status, RESET, RESET
+                );
+                Ok(CommandResult::Ok)
+            }
+            Command::CommandList => {
+                command::execute_list();
+                Ok(CommandResult::Ok)
+            }
+            Command::CommandReset => {
+                command::execute_reset();
+                Ok(CommandResult::Ok)
+            }
+            Command::CommandResetDeny => {
+                command::execute_reset_deny();
+                Ok(CommandResult::Ok)
+            }
+            Command::CommandAdd(cmd) => {
+                command::execute_add(&cmd);
+                Ok(CommandResult::Ok)
+            }
+            Command::CommandRemove(cmd) => {
+                command::execute_remove(&cmd);
+                Ok(CommandResult::Ok)
+            }
+            Command::CommandDeny(cmd) => {
+                command::execute_deny(&cmd);
+                Ok(CommandResult::Ok)
+            }
+            Command::CommandUndeny(cmd) => {
+                command::execute_undeny(&cmd);
+                Ok(CommandResult::Ok)
             }
         }
     }
