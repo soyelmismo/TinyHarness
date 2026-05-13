@@ -25,7 +25,7 @@ The project uses a Cargo workspace with two crates:
 tinyharness-lib/src/
 ├── lib.rs               Re-exports all public types
 ├── provider/             Provider trait + implementations (ollama, llama_cpp, vllm, openai_compat)
-├── config/mod.rs         Settings persistence (provider, model, mode, API key)
+├── config/mod.rs         Settings persistence (provider, model, mode, API key, denied commands)
 ├── mode.rs               AgentMode enum (casual/planning/agent/research) with system prompts
 ├── context.rs            WorkspaceContext — auto-detected project metadata + TINYHARNESS.md loading
 ├── session.rs            JSONL session persistence with UUIDs
@@ -38,9 +38,14 @@ tinyharness-lib/src/
 ```
 src/
 ├── main.rs               Entry point, CLI parsing, provider creation
-├── agent.rs              Main interaction loop, tool call dispatch, confirmation UI
+├── agent.rs              Main interaction loop, tool call dispatch, confirmation UI, context load warning
 ├── style.rs              ANSI color constants
-├── commands/             Slash command handlers (/help, /mode, /compact, etc.)
+├── commands/             Slash command handlers
+│   ├── mod.rs            CommandDispatcher — parse and dispatch /commands
+│   ├── command.rs        /command — manage safe/denied commands
+│   ├── compact.rs        /compact — cascading summarization for long sessions
+│   ├── settings.rs       /settings — configuration display (supports `all` variant)
+│   └── ...               Other commands (session, model, apikey, etc.)
 └── ui/                   Terminal UI helpers (confirmation prompts, input, diffs)
 ```
 
@@ -87,6 +92,8 @@ Key flow: `main.rs` → `create_provider()` → `run_agent_loop()` (in `agent.rs
 - System prompt is refreshed after mode switches, file pinning (/add, /drop), and /refresh
 - Session auto-saves every 5 messages
 - When adding new modules to `tinyharness-lib`, update `lib.rs` re-exports
+- Command safety: `is_safe_command()` in `src/agent.rs` checks prefixes and deny list; shell redirections (`2>&1`, `>/dev/null`) are stripped before matching
+- Context management: `/compact` uses cascading for sessions >60% of context window; load-time warnings at 70%/90% thresholds
 
 ## Known Gotchas
 
@@ -95,6 +102,9 @@ Key flow: `main.rs` → `create_provider()` → `run_agent_loop()` (in `agent.rs
 - `rustyline` history stored in `~/.local/share/tinyharness/history.txt`
 - Web search requires an Ollama API key set via `/apikey`
 - `#[macro_export]` macros (`define_tool!`, `extract_args!`, `register_tools!`) are exported at the crate root of `tinyharness_lib`, not in the `tools` module
+- Shell commands with redirections (`2>&1`, `>/dev/null`) are auto-accepted if the base command is safe — redirections are stripped before prefix matching
+- Cascading compaction may produce less coherent summaries than single-pass (trade-off for handling very long sessions)
+- Context load warnings are estimates based on token counting; actual usage may vary by model
 
 ## Verification Steps
 

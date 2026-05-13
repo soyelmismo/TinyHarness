@@ -74,6 +74,62 @@ tinyharness --ollama --url http://192.168.1.50:11434
 | `-l`, `--llama-cpp` | Use the llama.cpp provider |
 | `-u`, `--url` | Custom base URL for the provider |
 
+## Slash Commands
+
+TinyHarness supports slash commands for session management, configuration, and tool control:
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/mode [casual\|planning\|agent\|research]` | Switch agent mode |
+| `/compact [focus]` | Summarize older messages (supports cascading for long sessions) |
+| `/session [list\|new\|switch\|rename]` | Manage conversation sessions |
+| `/settings [summary\|all]` | Show configuration (`all` displays full safe command list) |
+| `/command [list\|add\|rm\|deny\|undeny\|reset]` | Manage auto-accepted and denied commands |
+| `/model [name]` | List or switch models |
+| `/apikey [key]` | Set/show/clear Ollama API key for web search |
+| `/add <file>`, `/drop <file>` | Pin or unpin files into context |
+| `/context` | Show auto-detected project context |
+| `/init` | Generate or update TINYHARNESS.md |
+| `/clear` | Clear terminal screen |
+| `/exit` | Quit |
+
+### Command Management
+
+The `/command` system lets you control which shell commands are auto-accepted:
+
+```
+/command list          # Show safe and denied commands
+/command add <cmd>     # Add a command to auto-accept list
+/command rm <cmd>      # Remove from auto-accept list
+/command deny <cmd>    # Add to deny list (always requires confirmation)
+/command undeny <cmd>  # Remove from deny list
+/command reset         # Reset safe commands to defaults
+/command resetdeny     # Clear the deny list
+```
+
+Safe commands are shown 3 per row with markers: `·` for defaults, `+` for user-added.
+Cross-list warnings alert you if you add a denied command or deny an auto-accepted one.
+
+### Session Compaction
+
+The `/compact` command summarizes older messages to free context space:
+
+- **Single-pass**: For sessions under 60% of context window
+- **Cascading**: For long sessions, breaks into chunks, summarizes each, then merges
+
+Example:
+```
+/compact focus on build errors and fixes
+Cascading compaction: 580 intermediate messages → 12 stages (50 messages/stage)
+  Stage 1/12: Compacting messages 1–50...
+  ...
+  Merging 12 summaries into final summary...
+Compacted: 600 messages → 6 messages
+```
+
+On session load, TinyHarness warns if the conversation exceeds 70% or 90% of the context window.
+
 ## Project Structure
 
 ```
@@ -89,7 +145,8 @@ src/
 │   ├── mod.rs           # CommandDispatcher — parse and dispatch /commands
 │   ├── apikey.rs        # /apikey — set/show/clear Ollama API key
 │   ├── clear.rs         # /clear — clear terminal
-│   ├── compact.rs       # /compact — summarize conversation history
+│   ├── command.rs       # /command — manage safe/denied commands (list, add, rm, deny, undeny, reset)
+│   ├── compact.rs       # /compact — summarize conversation history (supports cascading for long sessions)
 │   ├── context.rs       # /context — show workspace context
 │   ├── exit.rs          # /exit — quit
 │   ├── files.rs         # /add, /drop, /dropall, /files, /refresh — pin files into context
@@ -97,7 +154,7 @@ src/
 │   ├── init.rs          # /init — generate or update TINYHARNESS.md
 │   ├── models.rs        # /models, /model — list and switch models
 │   ├── sessions.rs      # /sessions, /session, /rename — session management
-│   └── settings.rs      # /settings — show current configuration
+│   └── settings.rs      # /settings — show current configuration (supports /settings all for full command list)
 ├── provider/
 │   ├── mod.rs           # Provider trait, shared types (ToolCall, ChatMessage, etc.)
 │   ├── ollama.rs        # Ollama provider implementation
