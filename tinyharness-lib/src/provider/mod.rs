@@ -90,9 +90,10 @@ pub trait Provider: Send + Sync {
 
     /// Send a chat request and return a receiver for streaming response chunks.
     ///
-    /// The provider spawns a background task that streams `ChatMessageResponse` chunks
-    /// through the returned receiver. The caller drains the receiver until it receives
-    /// a chunk with `done: true`.
+    /// Returns `Err(String)` if the request cannot be started (e.g. no model selected).
+    /// On success, the provider spawns a background task that streams `ChatMessageResponse`
+    /// chunks through the returned receiver. The caller drains the receiver until it
+    /// receives a chunk with `done: true`.
     ///
     /// Token usage, when available, is included in the final `ChatMessageResponse`
     /// chunk (in the `usage` field). No separate method is needed to retrieve it.
@@ -100,7 +101,12 @@ pub trait Provider: Send + Sync {
         &mut self,
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
-    ) -> Pin<Box<dyn Future<Output = tokio::sync::mpsc::Receiver<ChatMessageResponse>> + Send>>;
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<tokio::sync::mpsc::Receiver<ChatMessageResponse>, String>>
+                + Send,
+        >,
+    >;
 
     /// Set the request timeout in seconds. Only meaningful for providers that use timeouts.
     fn set_timeout(&mut self, _timeout_secs: u64) {}

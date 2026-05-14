@@ -61,6 +61,8 @@ src/
 - Settings persisted as JSON in `~/.config/tinyharness/settings.json`
 - Sessions stored as JSONL in `~/.local/share/tinyharness/sessions/`
 - Use `serde` + `schemars` for serialization and tool schema generation
+- Minimize dependencies — prefer `std` and lightweight crates over heavy ones; avoid adding new deps when the same can be achieved with what's already in the workspace
+- Prefer manual `Pin<Box<dyn Future>>` over `async-trait` to keep the dependency tree small
 - Error handling: `Result<T, String>` for user-facing errors, `Result<T, Box<dyn Error>>` for internal
 
 ## Architecture
@@ -97,7 +99,7 @@ Key flow: `main.rs` → `create_provider()` → `run_agent_loop()` (in `agent.rs
 
 ## Known Gotchas
 
-- Ollama provider does not do a health check on startup (unlike llama.cpp and vLLM)
+- All providers now run a health check on startup; Ollama is included
 - If the saved model is unavailable, auto-select picks the first available model with a warning
 - `rustyline` history stored in `~/.local/share/tinyharness/history.txt`
 - Web search requires an Ollama API key set via `/apikey`
@@ -105,6 +107,7 @@ Key flow: `main.rs` → `create_provider()` → `run_agent_loop()` (in `agent.rs
 - Shell commands with redirections (`2>&1`, `>/dev/null`) are auto-accepted if the base command is safe — redirections are stripped before prefix matching
 - Cascading compaction may produce less coherent summaries than single-pass (trade-off for handling very long sessions)
 - Context load warnings are estimates based on token counting; actual usage may vary by model
+- Ctrl+C interrupts the current LLM generation; a second Ctrl+C exits the process immediately
 
 ## Verification Steps
 

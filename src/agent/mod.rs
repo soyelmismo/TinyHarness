@@ -258,7 +258,20 @@ pub async fn run_agent_loop(
             // Call the provider — it returns a receiver for streaming chunks
             let mut recv = {
                 let mut provider = provider.lock().await;
-                provider.chat(messages.clone(), tools).await
+                match provider.chat(messages.clone(), tools).await {
+                    Ok(recv) => recv,
+                    Err(e) => {
+                        stdout.write_all(RESET.as_bytes())?;
+                        writeln!(
+                            stdout,
+                            "\n{}⚠ Failed to start request: {}{}\n",
+                            RED, e, RESET
+                        )?;
+                        // Remove the user message we just added
+                        messages.pop();
+                        break; // Back to input prompt
+                    }
+                }
             };
 
             let mut response_content = String::new();

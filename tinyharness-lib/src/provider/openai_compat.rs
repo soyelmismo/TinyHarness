@@ -88,13 +88,18 @@ impl OpenAiCompatInner {
     }
 
     /// Stream chat completions using the OpenAI-compatible API.
-    /// Returns a receiver for streaming response chunks.
+    /// Returns a receiver for streaming response chunks, or an error string
+    /// if the request cannot be started.
     pub fn chat(
         &self,
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
-    ) -> Pin<Box<dyn Future<Output = tokio::sync::mpsc::Receiver<ChatMessageResponse>> + Send>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<tokio::sync::mpsc::Receiver<ChatMessageResponse>, String>>
+                + Send,
+        >,
+    > {
         let (send, recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
 
         let model = self.model.clone().unwrap_or_default();
@@ -115,7 +120,7 @@ impl OpenAiCompatInner {
             let _usage = stream_chat_completions(&client, &chat_url, &body, &send).await;
         });
 
-        Box::pin(async move { recv })
+        Box::pin(async move { Ok(recv) })
     }
 }
 

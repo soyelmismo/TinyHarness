@@ -168,9 +168,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // during streaming generation. This allows interrupting LLM responses
     // without terminating the process.
     let interrupted = Arc::new(AtomicBool::new(false));
+    // First Ctrl+C sets a flag that the agent loop checks during streaming.
+    // A second Ctrl+C exits the process immediately so the user is never stuck.
     ctrlc::set_handler({
         let interrupted = Arc::clone(&interrupted);
         move || {
+            if interrupted.load(Ordering::SeqCst) {
+                // Already interrupted — user wants out now
+                std::process::exit(130);
+            }
             interrupted.store(true, Ordering::SeqCst);
         }
     })?;

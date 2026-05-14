@@ -259,7 +259,8 @@ pub fn format_args_summary(arguments: &serde_json::Value) -> String {
                     let val_str = match val {
                         serde_json::Value::String(s) => {
                             if s.len() > 60 {
-                                format!("\"{}...\"", &s[..57])
+                                let truncate_at = s.floor_char_boundary(57);
+                                format!("\"{}...\"", &s[..truncate_at])
                             } else {
                                 format!("\"{}\"", s)
                             }
@@ -343,5 +344,33 @@ mod tests {
     fn test_summarize_single_entry() {
         let result = summarize_listing_result("Cargo.toml", "ls");
         assert_eq!(result, "1 entries — Cargo.toml");
+    }
+
+    #[test]
+    fn test_format_args_summary_short_string() {
+        let args = serde_json::json!({"path": "/tmp/test.rs", "content": "hello"});
+        let result = format_args_summary(&args);
+        assert!(result.contains("path="));
+        assert!(result.contains("content="));
+    }
+
+    #[test]
+    fn test_format_args_summary_long_string_truncation() {
+        let long_val = "x".repeat(100);
+        let args = serde_json::json!({"content": long_val});
+        let result = format_args_summary(&args);
+        assert!(result.contains("..."));
+        // Should be truncated, not 100 chars long in the value
+        assert!(result.len() < 120);
+    }
+
+    #[test]
+    fn test_format_args_summary_multibyte_utf8_safe() {
+        // Multi-byte UTF-8 characters should not panic when truncated
+        let emoji_val = "🎉".repeat(30); // 30 * 4 bytes = 120 bytes
+        let args = serde_json::json!({"content": emoji_val});
+        let result = format_args_summary(&args);
+        // Should not panic and should contain the truncation marker
+        assert!(result.contains("content="));
     }
 }

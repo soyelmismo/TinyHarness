@@ -143,35 +143,21 @@ impl Provider for OllamaProvider {
         &mut self,
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
-    ) -> Pin<Box<dyn Future<Output = tokio::sync::mpsc::Receiver<ChatMessageResponse>> + Send>>
-    {
-        let (send, recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
-
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<tokio::sync::mpsc::Receiver<ChatMessageResponse>, String>>
+                + Send,
+        >,
+    > {
         let model = match self.model.clone() {
             Some(m) => m,
             None => {
-                // Need to send error synchronously and return the receiver
-                let send = send;
-                let err_response = ChatMessageResponse {
-                    message: ChatMessage {
-                        content: "Error: No model selected. Use /model <name> to select one."
-                            .to_string(),
-                        tool_calls: vec![],
-                    },
-                    done: true,
-                    is_error: true,
-                    usage: None,
-                };
-                // We can't .await here since we're not in an async context yet
-                // Use blocking_send or just spawn a task to send the error
-                let send_err = send.clone();
-                tokio::spawn(async move {
-                    let _ = send_err.send(err_response).await;
-                    drop(send);
+                return Box::pin(async move {
+                    Err("No model selected. Use /model <name> to select one.".to_string())
                 });
-                return Box::pin(async move { recv });
             }
         };
+        let (send, recv) = tokio::sync::mpsc::channel::<ChatMessageResponse>(1024);
         let timeout_secs = self.timeout_secs;
         let max_retries = self.max_retries;
         let client = self.client.clone();
@@ -283,6 +269,6 @@ impl Provider for OllamaProvider {
             }
         });
 
-        Box::pin(async move { recv })
+        Box::pin(async move { Ok(recv) })
     }
 }

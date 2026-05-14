@@ -39,8 +39,12 @@ impl Provider for LlamaCppProvider {
         &mut self,
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
-    ) -> Pin<Box<dyn Future<Output = tokio::sync::mpsc::Receiver<ChatMessageResponse>> + Send>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<tokio::sync::mpsc::Receiver<ChatMessageResponse>, String>>
+                + Send,
+        >,
+    > {
         self.inner.chat(messages, tools)
     }
 }

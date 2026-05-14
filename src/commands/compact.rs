@@ -103,7 +103,7 @@ async fn call_llm_summarize(
     ];
 
     let tools = vec![];
-    let mut recv = provider.chat(summarization_messages, tools).await;
+    let mut recv = provider.chat(summarization_messages, tools).await?;
 
     let mut summary_content = String::new();
     let mut done = false;

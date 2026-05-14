@@ -75,7 +75,7 @@ pub async fn execute_init(
 
     // Call the provider to generate the content — no tools needed
     let tools = vec![];
-    let mut recv = provider.chat(init_messages, tools).await;
+    let mut recv = provider.chat(init_messages, tools).await?;
 
     // Collect the response
     let mut generated_content = String::new();
