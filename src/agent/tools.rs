@@ -39,7 +39,11 @@ pub async fn handle_tool_calls<W: Write>(
     }
 
     let tool_count = tool_calls.len();
-    writeln!(stdout, "\n{}  {} tool call(s){}", DIM, tool_count, RESET)?;
+    writeln!(
+        stdout,
+        "\n{BG_TOOL}  {WHITE}{count} tool call(s){FILL_EOL}{RESET}",
+        count = tool_count
+    )?;
 
     messages.push(Message {
         role: Role::Assistant,
@@ -222,37 +226,39 @@ async fn execute_generic_tool<W: Write>(
             {
                 writeln!(
                     stdout,
-                    "  {}▶ {}{} (auto-accepted){}",
-                    DIM, call.function.name, RESET, RESET
+                    "{BG_DIM}  {DIM}▶ {WHITE}{name}{DIM} (auto-accepted){FILL_EOL}{RESET}",
+                    name = call.function.name
                 )
                 .unwrap();
-                writeln!(stdout, "    {}{}{}", CYAN, cmd, RESET).unwrap();
+                writeln!(
+                    stdout,
+                    "{BG_DIM}      {BRIGHT_CYAN}{cmd}{FILL_EOL}{RESET}",
+                    cmd = cmd
+                )
+                .unwrap();
             } else {
                 writeln!(
                     stdout,
-                    "  {}▶ {}{} (auto-accepted){}",
-                    DIM, call.function.name, RESET, RESET
+                    "{BG_DIM}  {DIM}▶ {WHITE}{name}{DIM} (auto-accepted){FILL_EOL}{RESET}",
+                    name = call.function.name
                 )
                 .unwrap();
             }
         } else {
             writeln!(
                 stdout,
-                "  {}▶ {}{} (auto-accepted){}",
-                DIM, call.function.name, RESET, RESET
+                "{BG_DIM}  {DIM}▶ {WHITE}{name}{DIM} (auto-accepted){FILL_EOL}{RESET}",
+                name = call.function.name
             )
             .unwrap();
         }
     } else {
-        stdout
-            .write_all(
-                format!(
-                    "  {}▶ {}{} Executing {}...\n",
-                    CYAN, RESET, call.function.name, RESET
-                )
-                .as_bytes(),
-            )
-            .unwrap();
+        writeln!(
+            stdout,
+            "{BG_DIM}  {DIM}▶ {WHITE}{name}{DIM} Executing...{FILL_EOL}{RESET}",
+            name = call.function.name
+        )
+        .unwrap();
     }
     stdout.flush().unwrap();
 
@@ -288,23 +294,35 @@ async fn execute_generic_tool<W: Write>(
     match call.function.name.as_str() {
         "read" => {
             let summary = result.lines().next().unwrap_or("(empty result)");
-            writeln!(stdout, "    {}", summary).unwrap();
+            writeln!(
+                stdout,
+                "{BG_DIM}      {DIM}{summary}{FILL_EOL}{RESET}",
+                summary = summary
+            )
+            .unwrap();
         }
         "ls" | "grep" | "glob" => {
             let summary = super::display::summarize_listing_result(&result, &call.function.name);
-            writeln!(stdout, "    {}", summary).unwrap();
+            writeln!(
+                stdout,
+                "{BG_DIM}      {DIM}{summary}{FILL_EOL}{RESET}",
+                summary = summary
+            )
+            .unwrap();
         }
         _ => {
             crate::ui::wrap::write_wrapped_lines(
                 stdout,
                 &result,
-                "    ",
-                "      ",
+                &format!("{BG_DIM}      "),
+                &format!("      {BG_DIM}{DIM}"),
                 crate::ui::wrap::MAX_LINE_WIDTH,
+                true, // fill background to end of line
             )
             .unwrap();
         }
     }
+    writeln!(stdout, "{RESET}").unwrap();
     stdout.flush().unwrap();
     messages.push(Message {
         role: Role::Tool,

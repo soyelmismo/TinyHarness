@@ -10,20 +10,20 @@ use tinyharness_lib::provider::ToolCall;
 use crate::style::*;
 
 /// Maximum width available for the command text on the first line,
-/// after the `  │ ` prefix (4 chars) and `$ ` (2 chars).
-const CMD_FIRST_AVAIL: usize = MAX_LINE_WIDTH - 6;
+/// after the `  ` prefix (2 chars) and `$ ` (2 chars).
+const CMD_FIRST_AVAIL: usize = MAX_LINE_WIDTH - 4;
 /// Maximum width available for continuation lines,
-/// after the `  │ > ` prefix (6 chars).
-const CMD_CONT_AVAIL: usize = MAX_LINE_WIDTH - 6;
+/// after the `  ` prefix (2 chars) and `> ` (2 chars).
+const CMD_CONT_AVAIL: usize = MAX_LINE_WIDTH - 4;
 
 /// Display a shell command, splitting it across multiple lines at word
 /// boundaries when it exceeds the available terminal width.
 ///
-/// First line: `  │ $ cmd...`
-/// Continuation: `  │ > rest...`
+/// Each line has BG_WARN background filling the full terminal width.
 fn write_command_lines<W: Write>(stdout: &mut W, cmd: &str) -> Result<(), Box<dyn Error>> {
-    let prefix_first = format!("  │ {}{}$ {}", BOLD, TITLE_COLOR, RESET);
-    let prefix_cont = format!("  │ {}> {}{}", DIM, TITLE_COLOR, RESET);
+    // BG_WARN starts at column 0, no RESET until end of line.
+    let prefix_first = format!("{BG_WARN}  {BOLD}{WHITE}$ ");
+    let prefix_cont = format!("{BG_WARN}  {DIM}{WHITE}> ");
 
     // Split at spaces for word-wrapping
     let mut remaining = cmd;
@@ -37,7 +37,11 @@ fn write_command_lines<W: Write>(stdout: &mut W, cmd: &str) -> Result<(), Box<dy
         };
 
         if remaining.len() <= avail {
-            writeln!(stdout, "{}{}{}{}{}", prefix, CYAN, remaining, BOLD, RESET)?;
+            writeln!(
+                stdout,
+                "{prefix}{BRIGHT_CYAN}{remaining}{FILL_EOL}{RESET}",
+                remaining = remaining
+            )?;
             break;
         }
 
@@ -50,12 +54,8 @@ fn write_command_lines<W: Write>(stdout: &mut W, cmd: &str) -> Result<(), Box<dy
                 // No space found — hard-break at width limit
                 writeln!(
                     stdout,
-                    "{}{}{}{}{}",
-                    prefix,
-                    CYAN,
-                    &remaining[..chunk_end],
-                    BOLD,
-                    RESET
+                    "{prefix}{BRIGHT_CYAN}{chunk}{FILL_EOL}{RESET}",
+                    chunk = &remaining[..chunk_end]
                 )?;
                 remaining = remaining[chunk_end..].trim_start();
                 continue;
@@ -63,12 +63,8 @@ fn write_command_lines<W: Write>(stdout: &mut W, cmd: &str) -> Result<(), Box<dy
         };
         writeln!(
             stdout,
-            "{}{}{}{}{}",
-            prefix,
-            CYAN,
-            &chunk[..split_at],
-            BOLD,
-            RESET
+            "{prefix}{BRIGHT_CYAN}{chunk}{FILL_EOL}{RESET}",
+            chunk = &chunk[..split_at]
         )?;
         remaining = remaining[chunk[..split_at].len()..].trim_start();
     }
@@ -99,8 +95,8 @@ pub fn prompt_tool_confirmation<W: Write>(
     // ── Header ──
     writeln!(
         stdout,
-        "\n{}  ┌{}─── {}⚠ {}{}{} ───{}",
-        BOLD, BOX_COLOR, WARNING_COLOR, name, BOLD, BOX_COLOR, RESET
+        "\n{BG_WARN}  {WHITE}─── {BRIGHT_YELLOW}⚠ {WHITE}{name}{WHITE} ───{FILL_EOL}{RESET}",
+        name = name
     )?;
 
     // ── Arguments (skip large fields already shown in diff/preview) ──
@@ -126,7 +122,12 @@ pub fn prompt_tool_confirmation<W: Write>(
                 }
                 other => other.to_string(),
             };
-            writeln!(stdout, "  │ {}{}:{} {}", CYAN, key, RESET, val_str)?;
+            writeln!(
+                stdout,
+                "{BG_WARN}  {BRIGHT_CYAN}{key}: {WHITE}{val}{FILL_EOL}{RESET}",
+                key = key,
+                val = val_str
+            )?;
         }
     }
 
@@ -164,14 +165,9 @@ pub fn prompt_tool_confirmation<W: Write>(
     // ── Footer with prompt ──
     writeln!(
         stdout,
-        "  └{}───────────────────────────────{}",
-        BOX_COLOR, RESET
+        "{BG_WARN}  {DIM}───────────────────────────────{FILL_EOL}{RESET}"
     )?;
-    write!(
-        stdout,
-        "  {}Allow? {}y{}/n/a{}: {}",
-        BOLD, GREEN, BOLD, RESET, RESET
-    )?;
+    write!(stdout, "  {BOLD}Allow? {GREEN}y{BOLD}/n/a{RESET}: ")?;
     stdout.flush()?;
 
     let mut input = String::new();
@@ -193,7 +189,8 @@ mod tests {
 
     /// Strip ANSI escape sequences from a string for easier assertions.
     fn strip_ansi(s: &str) -> String {
-        let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+        // Match SGR sequences (\x1b[...m) and other CSI sequences like \x1b[K (clear to EOL)
+        let re = regex::Regex::new(r"\x1b\[[0-9;]*[mK]").unwrap();
         re.replace_all(s, "").to_string()
     }
 
@@ -214,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_long_command_wraps() {
-        // Build a command that exceeds MAX_LINE_WIDTH - 6 chars
+        // Build a command that exceeds MAX_LINE_WIDTH - 4 chars
         let long_cmd: Vec<String> = (0..50).map(|i| format!("arg{i}")).collect();
         let cmd = long_cmd.join(" ");
         assert!(

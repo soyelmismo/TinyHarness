@@ -17,8 +17,10 @@ use rustyline::Editor;
 use tokio::sync::Mutex;
 
 use tinyharness_lib::{
+    config::load_settings,
     provider::{Message, Provider, Role},
     session::{Session, SessionStore},
+    token::{ContextWindowSize, estimate_conversation_tokens},
     tools::ToolManager,
 };
 
@@ -29,8 +31,8 @@ use crate::{
 };
 
 pub use display::{
-    format_args_summary, print_context_load_warning, print_conversation_history,
-    summarize_listing_result,
+    format_args_summary, format_context_status, print_context_load_warning,
+    print_conversation_history, summarize_listing_result,
 };
 pub use input::read_multiline_input;
 pub use safety::{is_safe_command, strip_safe_descriptor_redirections};
@@ -80,7 +82,7 @@ pub async fn run_agent_loop(
         print_conversation_history(messages, &mut stdout)?;
     }
 
-    // Warn if the loaded session is near or over the context window limit.
+    // Warn if near/over the context window limit.
     print_context_load_warning(messages, &mut stdout)?;
 
     let helper = CommandHelper::new();
@@ -102,26 +104,30 @@ pub async fn run_agent_loop(
         rustyline::EventHandler::Simple(rustyline::Cmd::Newline),
     );
 
+    let settings = load_settings();
+    let context_size = settings
+        .context_limit
+        .map(ContextWindowSize::Custom)
+        .unwrap_or_else(ContextWindowSize::default_size);
+
     loop {
         // Clear any stale interrupt flag from a previous turn.
         interrupted.store(false, Ordering::SeqCst);
 
         let mode_label = dispatcher.current_mode.to_string();
-        let msg_count = messages.len();
         let pinned_count = dispatcher.file_context.pinned_file_count();
-        let context_info = if pinned_count > 0 {
-            format!("{} msgs,{}{}{} pinned", msg_count, BLUE, pinned_count, GRAY)
-        } else {
-            format!("{} msgs", msg_count)
-        };
+        let status_line = display::format_context_status(
+            messages.len(),
+            pinned_count,
+            estimate_conversation_tokens(messages),
+            context_size,
+        );
         let prompt = format!(
-            "{}[{}]{} {}{}> {}{}",
-            BOLD, mode_label, RESET, GRAY, context_info, BLUE, RESET
+            "{}\n{}[{}]{}> {}{}",
+            status_line, BOLD, mode_label, RESET, BLUE, RESET
         );
-        let continuation_prompt = format!(
-            "{}[{}]{} {}{}...> {}{}",
-            BOLD, mode_label, RESET, GRAY, context_info, BLUE, RESET
-        );
+        let continuation_prompt =
+            format!("{}[{}]{}...> {}{}", BOLD, mode_label, RESET, BLUE, RESET);
 
         // Read input with support for multi-line continuation
         let user_input = read_multiline_input(
@@ -249,7 +255,6 @@ pub async fn run_agent_loop(
 
         // auto_accept persists across all agent iterations within this user turn,
         let mut auto_accept = false;
-        let mut token_usage: Option<tinyharness_lib::provider::TokenUsage> = None;
 
         loop {
             // Filter tools based on current mode
@@ -297,11 +302,6 @@ pub async fn run_agent_loop(
 
                                 if msg.is_error {
                                     is_error = true;
-                                }
-
-                                // Capture token usage from the final response
-                                if msg.done && token_usage.is_none() {
-                                    token_usage = msg.usage.clone();
                                 }
 
                                 if !msg.message.content.is_empty() {
@@ -429,8 +429,8 @@ pub async fn run_agent_loop(
             break;
         }
 
-        // Display token usage after turn is complete
-        display::display_token_usage(messages, token_usage.as_ref(), &mut stdout)?;
+        // Blank line after agent response for visual separation
+        writeln!(stdout)?;
     }
 
     // Save history on exit

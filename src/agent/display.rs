@@ -4,8 +4,7 @@ use tinyharness_lib::{
     config::load_settings,
     provider::{Message, Role},
     token::{
-        ContextWindowSize, check_context_warning, estimate_conversation_tokens, estimate_tokens,
-        format_token_count,
+        ContextWindowSize, check_context_warning, estimate_conversation_tokens, format_token_count,
     },
 };
 
@@ -97,7 +96,11 @@ pub fn print_conversation_history<W: Write>(
                 }
                 if !msg.tool_calls.is_empty() {
                     for tc in &msg.tool_calls {
-                        writeln!(stdout, "{}  {}▶{} {}", DIM, CYAN, RESET, tc.function.name)?;
+                        writeln!(
+                            stdout,
+                            "{BG_DIM}  {DIM}▶ {WHITE}{name}{DIM}{FILL_EOL}{RESET}",
+                            name = tc.function.name
+                        )?;
                     }
                 }
                 writeln!(stdout)?;
@@ -108,19 +111,29 @@ pub fn print_conversation_history<W: Write>(
 
                 if tool_name == "read" {
                     let summary = result_body.lines().next().unwrap_or("(empty result)");
-                    writeln!(stdout, "    {}", summary)?;
+                    writeln!(
+                        stdout,
+                        "{BG_DIM}      {DIM}{summary}{FILL_EOL}{RESET}",
+                        summary = summary
+                    )?;
                 } else if matches!(tool_name, "ls" | "grep" | "glob") {
                     let summary = summarize_listing_result(result_body, tool_name);
-                    writeln!(stdout, "    {}", summary)?;
+                    writeln!(
+                        stdout,
+                        "{BG_DIM}      {DIM}{summary}{FILL_EOL}{RESET}",
+                        summary = summary
+                    )?;
                 } else {
                     crate::ui::wrap::write_wrapped_lines(
                         stdout,
                         result_body,
-                        "    ",
-                        "      ",
+                        &format!("{BG_DIM}      "),
+                        &format!("      {BG_DIM}{DIM}"),
                         crate::ui::wrap::MAX_LINE_WIDTH,
+                        true,
                     )?;
                 }
+                writeln!(stdout, "{RESET}")?;
             }
         }
     }
@@ -129,9 +142,53 @@ pub fn print_conversation_history<W: Write>(
     Ok(())
 }
 
-/// Display token usage after a turn is complete.
-pub fn display_token_usage<W: Write>(
+/// Format a compact context status line (pi-style).
+///
+/// Returns a string like: `5 msgs · 1.2K/8K (15%) · 2 pinned`
+/// Colors are applied based on usage thresholds.
+pub fn format_context_status(
+    msg_count: usize,
+    pinned_count: usize,
+    estimated_tokens: u32,
+    context_size: ContextWindowSize,
+) -> String {
+    let usage_pct = context_size.usage_percentage(estimated_tokens);
+    let used_str = format_token_count(estimated_tokens);
+    let max_str = format_token_count(context_size.tokens());
+
+    let pct_color = if usage_pct >= 90.0 {
+        RED
+    } else if usage_pct >= 70.0 {
+        YELLOW
+    } else {
+        GRAY
+    };
+
+    let mut parts = vec![format!("{} msgs", msg_count)];
+    parts.push(format!(
+        "{}{}/{}{} ({:.0}%){}",
+        pct_color, used_str, max_str, pct_color, usage_pct, RESET
+    ));
+    if pinned_count > 0 {
+        parts.push(format!("{}{} pinned{}", BLUE, pinned_count, RESET));
+    }
+
+    format!(
+        "{}{}{}",
+        DIM,
+        parts.join(&format!(" {}·{} ", DIM, RESET)),
+        RESET
+    )
+}
+
+/// Display a pi-style context status line.
+///
+/// Shows a compact dim line with message count,
+/// token usage, context percentage, and pinned file count.
+/// Also emits a warning if the context window is nearing capacity.
+pub fn display_context_status<W: Write>(
     messages: &[Message],
+    pinned_count: usize,
     token_usage: Option<&tinyharness_lib::provider::TokenUsage>,
     stdout: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -142,48 +199,14 @@ pub fn display_token_usage<W: Write>(
         .context_limit
         .map(ContextWindowSize::Custom)
         .unwrap_or_else(ContextWindowSize::default_size);
-    let usage_pct = context_size.usage_percentage(estimated_total);
 
-    let is_estimated = token_usage.is_none();
-    let (prompt_tokens, completion_tokens, total_tokens) = if let Some(usage) = token_usage {
-        (
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.total_tokens,
-        )
-    } else {
-        let prompt_est =
-            estimate_conversation_tokens(&messages[..messages.len().saturating_sub(1)]);
-        let last_msg = messages.last().map(|m| m.content.as_str()).unwrap_or("");
-        let completion_est = estimate_tokens(last_msg);
-        (prompt_est, completion_est, prompt_est + completion_est)
-    };
+    // Update estimated total with actual usage if available
+    let estimated_total = token_usage
+        .map(|u| u.total_tokens)
+        .unwrap_or(estimated_total);
 
-    let estimation_marker = if is_estimated { " (estimated)" } else { "" };
-
-    writeln!(
-        stdout,
-        "\n{}{}Tokens{}{}:{} prompt={}, completion={}, total={} | {}{}{} of context ({:.1}%){}",
-        DIM,
-        BOLD,
-        if is_estimated { YELLOW } else { RESET },
-        estimation_marker,
-        RESET,
-        prompt_tokens,
-        completion_tokens,
-        total_tokens,
-        if usage_pct >= 90.0 {
-            RED
-        } else if usage_pct >= 70.0 {
-            YELLOW
-        } else {
-            GRAY
-        },
-        format_token_count(estimated_total),
-        RESET,
-        usage_pct,
-        RESET
-    )?;
+    let status = format_context_status(messages.len(), pinned_count, estimated_total, context_size);
+    writeln!(stdout, "{}", status)?;
 
     // Show context warning if needed
     if let Some(warning) = check_context_warning(estimated_total, context_size) {
@@ -205,7 +228,6 @@ pub fn display_token_usage<W: Write>(
         )?;
     }
 
-    stdout.write_all("\n".as_bytes())?;
     stdout.flush()?;
     Ok(())
 }
@@ -372,5 +394,41 @@ mod tests {
         let result = format_args_summary(&args);
         // Should not panic and should contain the truncation marker
         assert!(result.contains("content="));
+    }
+
+    #[test]
+    fn test_format_context_status_low_usage() {
+        // 500 tokens out of 8K = ~6%
+        let result = format_context_status(5, 0, 500, ContextWindowSize::Small8K);
+        // Should contain "5 msgs", token info, and percentage
+        assert!(result.contains("5 msgs"));
+        assert!(result.contains("500"));
+        assert!(result.contains("8.2K")); // 8192 tokens = 8.2K
+        assert!(result.contains("6%"));
+        // No pinned info when count is 0
+        assert!(!result.contains("pinned"));
+    }
+
+    #[test]
+    fn test_format_context_status_with_pinned() {
+        let result = format_context_status(10, 3, 2000, ContextWindowSize::Small8K);
+        assert!(result.contains("10 msgs"));
+        assert!(result.contains("3 pinned"));
+        assert!(result.contains("2.0K/8.2K")); // 2000 = 2.0K, 8192 = 8.2K
+    }
+
+    #[test]
+    fn test_format_context_status_high_usage_warning_color() {
+        // 90%+ should use RED color code
+        let result = format_context_status(20, 0, 7500, ContextWindowSize::Small8K);
+        assert!(result.contains("20 msgs"));
+        assert!(result.contains(RED));
+    }
+
+    #[test]
+    fn test_format_context_status_medium_usage_warning_color() {
+        // 70-89% should use YELLOW color code
+        let result = format_context_status(10, 0, 6000, ContextWindowSize::Small8K);
+        assert!(result.contains(YELLOW));
     }
 }
