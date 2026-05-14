@@ -208,6 +208,20 @@ fn confirm_tool_call<W: Write>(
 
 /// Execute a generic tool call, display the result summary, and record the
 /// tool result as a message in the conversation.
+/// Format a duration in milliseconds as a human-readable string.
+/// Under 1 second: "42ms", 1-59 seconds: "1.2s", 60+ seconds: "1m 23s"
+fn format_duration(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{}ms ", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s ", ms as f64 / 1000.0)
+    } else {
+        let mins = ms / 60_000;
+        let secs = (ms % 60_000) / 1000;
+        format!("{}m {}s ", mins, secs)
+    }
+}
+
 async fn execute_generic_tool<W: Write>(
     call: &ToolCall,
     tool_manager: &ToolManager,
@@ -294,23 +308,70 @@ async fn execute_generic_tool<W: Write>(
     match call.function.name.as_str() {
         "read" => {
             let summary = result.lines().next().unwrap_or("(empty result)");
+            let indicator = if result.starts_with("Error:") {
+                RED
+            } else {
+                GREEN
+            };
+            let icon = if result.starts_with("Error:") {
+                "✗"
+            } else {
+                "✓"
+            };
             writeln!(
                 stdout,
-                "{BG_DIM}      {DIM}{summary}{FILL_EOL}{RESET}",
+                "{BG_DIM}  {indicator}{icon}{RESET}{BG_DIM} {DIM}{name}{RESET}{BG_DIM} {duration}{DIM}{summary}{FILL_EOL}{RESET}",
+                indicator = indicator,
+                icon = icon,
+                name = call.function.name,
+                duration = format_duration(duration_ms),
                 summary = summary
             )
             .unwrap();
         }
         "ls" | "grep" | "glob" => {
             let summary = super::display::summarize_listing_result(&result, &call.function.name);
+            let indicator = if result.starts_with("Error:") {
+                RED
+            } else {
+                GREEN
+            };
+            let icon = if result.starts_with("Error:") {
+                "✗"
+            } else {
+                "✓"
+            };
             writeln!(
                 stdout,
-                "{BG_DIM}      {DIM}{summary}{FILL_EOL}{RESET}",
+                "{BG_DIM}  {indicator}{icon}{RESET}{BG_DIM} {DIM}{name}{RESET}{BG_DIM} {duration}{DIM}{summary}{FILL_EOL}{RESET}",
+                indicator = indicator,
+                icon = icon,
+                name = call.function.name,
+                duration = format_duration(duration_ms),
                 summary = summary
             )
             .unwrap();
         }
         _ => {
+            let indicator = if result.starts_with("Error:") {
+                RED
+            } else {
+                GREEN
+            };
+            let icon = if result.starts_with("Error:") {
+                "✗"
+            } else {
+                "✓"
+            };
+            writeln!(
+                stdout,
+                "{BG_DIM}  {indicator}{icon}{RESET}{BG_DIM} {DIM}{name}{RESET}{BG_DIM} {duration}",
+                indicator = indicator,
+                icon = icon,
+                name = call.function.name,
+                duration = format_duration(duration_ms),
+            )
+            .unwrap();
             crate::ui::wrap::write_wrapped_lines(
                 stdout,
                 &result,

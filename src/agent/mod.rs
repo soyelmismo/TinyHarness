@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 
 use tinyharness_lib::{
     config::load_settings,
+    mode::AgentMode,
     provider::{Message, Provider, Role},
     session::{Session, SessionStore},
     token::{ContextWindowSize, estimate_conversation_tokens},
@@ -115,6 +116,12 @@ pub async fn run_agent_loop(
         interrupted.store(false, Ordering::SeqCst);
 
         let mode_label = dispatcher.current_mode.to_string();
+        let mode_color = match dispatcher.current_mode {
+            AgentMode::Casual => GREEN,
+            AgentMode::Planning => YELLOW,
+            AgentMode::Agent => CYAN,
+            AgentMode::Research => ORANGE,
+        };
         let pinned_count = dispatcher.file_context.pinned_file_count();
         let status_line = display::format_context_status(
             messages.len(),
@@ -124,10 +131,12 @@ pub async fn run_agent_loop(
         );
         let prompt = format!(
             "{}\n{}[{}]{}> {}{}",
-            status_line, BOLD, mode_label, RESET, BLUE, RESET
+            status_line, mode_color, mode_label, RESET, BLUE, RESET
         );
-        let continuation_prompt =
-            format!("{}[{}]{}...> {}{}", BOLD, mode_label, RESET, BLUE, RESET);
+        let continuation_prompt = format!(
+            "{}[{}]{}...> {}{}",
+            mode_color, mode_label, RESET, BLUE, RESET
+        );
 
         // Read input with support for multi-line continuation
         let user_input = read_multiline_input(
