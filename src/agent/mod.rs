@@ -255,6 +255,42 @@ pub async fn run_agent_loop(
                                 );
                             }
                         },
+                        Ok(CommandResult::SkillUse(skill_name)) => {
+                            match dispatcher.skill_registry.get(&skill_name) {
+                                Some(skill) => {
+                                    let skill_content =
+                                        dispatcher.skill_registry.format_skill_content(skill);
+                                    eprintln!(
+                                        "{}⚡ Skill activated: {}{}{} — {}{}",
+                                        BOLD, CYAN, skill_name, RESET, skill.description, RESET
+                                    );
+                                    // Inject a user message indicating skill activation
+                                    messages.push(Message {
+                                        role: Role::User,
+                                        content: format!("/use {}", skill_name),
+                                        tool_calls: vec![],
+                                    });
+                                    session.append_message(
+                                        messages.last().expect("just pushed a message"),
+                                    );
+                                    // Inject the skill content as a system-level instruction
+                                    messages.push(Message {
+                                        role: Role::System,
+                                        content: skill_content,
+                                        tool_calls: vec![],
+                                    });
+                                    session.append_message(
+                                        messages.last().expect("just pushed a message"),
+                                    );
+                                }
+                                None => {
+                                    eprintln!(
+                                        "{}⚠ Skill '{}' not found — it may have been removed.{}",
+                                        RED, skill_name, RESET
+                                    );
+                                }
+                            }
+                        }
                         Err(e) => {
                             eprintln!("{}{}{}", RED, e, RESET);
                         }
@@ -280,7 +316,7 @@ pub async fn run_agent_loop(
         });
 
         // Auto-save: user message
-        session.append_message(messages.last().unwrap());
+        session.append_message(messages.last().expect("just pushed a message"));
 
         // auto_accept persists across all agent iterations within this user turn,
         let mut auto_accept = false;
@@ -411,7 +447,7 @@ pub async fn run_agent_loop(
                         content: response_content,
                         tool_calls: vec![],
                     });
-                    session.append_message(messages.last().unwrap());
+                    session.append_message(messages.last().expect("just pushed a message"));
                 } else {
                     // No content — remove the user message
                     messages.pop();
@@ -487,7 +523,7 @@ pub async fn run_agent_loop(
                 content: response_content,
                 tool_calls: vec![],
             });
-            session.append_message(messages.last().unwrap());
+            session.append_message(messages.last().expect("just pushed a message"));
 
             break;
         }

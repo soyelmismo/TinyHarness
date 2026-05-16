@@ -50,7 +50,7 @@ pub async fn handle_tool_calls<W: Write>(
         content: response_content.to_string(),
         tool_calls: tool_calls.to_vec(),
     });
-    session.append_message(messages.last().unwrap());
+    session.append_message(messages.last().expect("just pushed a message"));
 
     for call in tool_calls {
         // Check for interrupt between tool calls
@@ -89,6 +89,27 @@ pub async fn handle_tool_calls<W: Write>(
                         )
                         .await?;
                     }
+                    SignalEvent::InvokeSkill { skill_name } => {
+                        // Clone skill info to avoid borrowing dispatcher while calling it mutably
+                        let skill_result = {
+                            let registry = &dispatcher.skill_registry;
+                            registry.get(&skill_name).map(|s| {
+                                (
+                                    s.name.clone(),
+                                    s.description.clone(),
+                                    registry.format_skill_content(s),
+                                )
+                            })
+                        };
+                        handle_invoke_skill(
+                            &skill_name,
+                            &skill_result,
+                            dispatcher,
+                            messages,
+                            session,
+                            stdout,
+                        )?;
+                    }
                 }
             } else {
                 messages.push(Message {
@@ -99,7 +120,7 @@ pub async fn handle_tool_calls<W: Write>(
                     ),
                     tool_calls: vec![],
                 });
-                session.append_message(messages.last().unwrap());
+                session.append_message(messages.last().expect("just pushed a message"));
             }
             continue;
         }
@@ -133,7 +154,7 @@ pub async fn handle_tool_calls<W: Write>(
                 ),
                 tool_calls: vec![],
             });
-            session.append_message(messages.last().unwrap());
+            session.append_message(messages.last().expect("just pushed a message"));
             continue;
         }
 
@@ -430,7 +451,7 @@ async fn execute_generic_tool<W: Write>(
         ),
         tool_calls: vec![],
     });
-    session.append_message(messages.last().unwrap());
+    session.append_message(messages.last().expect("just pushed a message"));
 }
 
 /// Handle the switch_mode signal: update dispatcher and system prompt.
@@ -461,7 +482,7 @@ fn handle_switch_mode<W: Write>(
                 ),
                 tool_calls: vec![],
             });
-            session.append_message(messages.last().unwrap());
+            session.append_message(messages.last().expect("just pushed a message"));
         }
         Err(msg) => {
             writeln!(stdout, "  {}{}{}", ORANGE, msg, RESET)?;
@@ -470,7 +491,7 @@ fn handle_switch_mode<W: Write>(
                 content: format!("Already in '{}' mode. No change was made.", new_mode),
                 tool_calls: vec![],
             });
-            session.append_message(messages.last().unwrap());
+            session.append_message(messages.last().expect("just pushed a message"));
         }
     }
     Ok(())
@@ -490,7 +511,7 @@ fn handle_question<W: Write>(
             content: "Error: 'question' argument is required for the question tool.".to_string(),
             tool_calls: vec![],
         });
-        session.append_message(messages.last().unwrap());
+        session.append_message(messages.last().expect("just pushed a message"));
         return Ok(());
     }
 
@@ -502,7 +523,7 @@ fn handle_question<W: Write>(
                     .to_string(),
             tool_calls: vec![],
         });
-        session.append_message(messages.last().unwrap());
+        session.append_message(messages.last().expect("just pushed a message"));
         return Ok(());
     }
 
@@ -598,7 +619,7 @@ fn handle_question<W: Write>(
         content: result_content,
         tool_calls: vec![],
     });
-    session.append_message(messages.last().unwrap());
+    session.append_message(messages.last().expect("just pushed a message"));
     Ok(())
 }
 
@@ -633,7 +654,7 @@ async fn handle_auto_compact<W: Write>(
                 ),
                 tool_calls: vec![],
             });
-            session.append_message(messages.last().unwrap());
+            session.append_message(messages.last().expect("just pushed a message"));
         }
         Err(e) => {
             messages.push(Message {
@@ -644,9 +665,78 @@ async fn handle_auto_compact<W: Write>(
                 ),
                 tool_calls: vec![],
             });
-            session.append_message(messages.last().unwrap());
+            session.append_message(messages.last().expect("just pushed a message"));
         }
     }
 
+    Ok(())
+}
+
+/// Handle the invoke_skill signal: activate a skill by name.
+///
+/// When the model invokes a skill, we look it up in the skill registry,
+/// display a confirmation message, and inject the skill's content into
+/// the conversation as a tool result message.
+///
+/// `skill_result` is `Some((name, description, content))` if the skill was found,
+/// or `None` if not found. This avoids borrowing the dispatcher while also
+/// calling it mutably.
+fn handle_invoke_skill<W: Write>(
+    skill_name: &str,
+    skill_result: &Option<(String, String, String)>,
+    dispatcher: &mut crate::commands::CommandDispatcher,
+    messages: &mut Vec<Message>,
+    session: &mut Session,
+    stdout: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match skill_result {
+        Some((name, description, skill_content)) => {
+            writeln!(
+                stdout,
+                "\n{}{}⚡ Skill activated: {}{}{} — {}{}",
+                BOLD, CYAN, BOLD, name, RESET, description, RESET
+            )?;
+            stdout.flush()?;
+
+            messages.push(Message {
+                role: Role::Tool,
+                content: format!(
+                    "SUCCESS: Skill '{}' activated. The skill's instructions are now in effect.\n\n---\n{}",
+                    name, skill_content
+                ),
+                tool_calls: vec![],
+            });
+            session.append_message(messages.last().expect("just pushed a message"));
+
+            // Refresh system prompt so the skill index is up-to-date
+            dispatcher.refresh_system_prompt(messages);
+        }
+        None => {
+            // Need to re-borrow for the error message
+            let available = dispatcher
+                .skill_registry
+                .skills
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                stdout,
+                "\n{}⚠ Skill '{}' not found.{} Use {}/skills{} to list available skills.",
+                ORANGE, skill_name, RESET, BOLD, RESET
+            )?;
+            stdout.flush()?;
+
+            messages.push(Message {
+                role: Role::Tool,
+                content: format!(
+                    "Error: Skill '{}' not found. Available skills: {}. Use /skills to list them.",
+                    skill_name, available
+                ),
+                tool_calls: vec![],
+            });
+            session.append_message(messages.last().expect("just pushed a message"));
+        }
+    }
     Ok(())
 }

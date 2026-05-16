@@ -11,6 +11,7 @@ pub mod init;
 pub mod models;
 pub mod sessions;
 pub mod settings;
+pub mod skill;
 
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use tinyharness_lib::{
     context::WorkspaceContext,
     mode::AgentMode,
     provider::{Message, Provider, Role},
+    skill::SkillRegistry,
 };
 
 use crate::style::*;
@@ -62,6 +64,9 @@ pub enum Command {
     CommandResetDeny,
     CommandHelp,
     Audit(String),
+    SkillList,
+    SkillShow(String),
+    SkillUse(String),
 }
 
 /// Result of dispatching a command.
@@ -74,6 +79,8 @@ pub enum CommandResult {
     RenameSession(String),
     /// The /init command was run — workspace context should be refreshed.
     Init(InitResult),
+    /// The user wants to activate a skill, injecting its instructions into the conversation.
+    SkillUse(String),
 }
 
 pub struct CommandDispatcher {
@@ -83,6 +90,7 @@ pub struct CommandDispatcher {
     pub workspace_ctx: WorkspaceContext,
     pub file_context: FileContext,
     pub session_id: Option<String>,
+    pub skill_registry: SkillRegistry,
 }
 
 impl CommandDispatcher {
@@ -97,6 +105,7 @@ impl CommandDispatcher {
             workspace_ctx,
             file_context: FileContext::new(),
             session_id: None,
+            skill_registry: SkillRegistry::discover(),
         }
     }
 
@@ -132,8 +141,8 @@ impl CommandDispatcher {
         Ok(())
     }
 
-    /// Build the system prompt for the current mode, appending workspace context
-    /// and pinned file content.
+    /// Build the system prompt for the current mode, appending workspace context,
+    /// pinned file content, and skill index.
     pub fn build_system_prompt(&self) -> String {
         let mut prompt = format!(
             "{}\n\n---\n{}",
@@ -144,6 +153,13 @@ impl CommandDispatcher {
         // Inject pinned file content
         if !self.file_context.is_empty() {
             prompt.push_str(&self.file_context.format_for_prompt());
+        }
+
+        // Inject skill index for model auto-invocation
+        let skill_index = self.skill_registry.format_index_for_prompt();
+        if !skill_index.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&skill_index);
         }
 
         prompt
@@ -229,6 +245,30 @@ impl CommandDispatcher {
                 }
             }
             "/audit" => Some(Command::Audit(arg.unwrap_or_default())),
+            "/skills" => Some(Command::SkillList),
+            "/skill" => {
+                let name = arg.unwrap_or_default();
+                if name.is_empty() {
+                    Some(Command::SkillList)
+                } else if name == "use" || name.starts_with("use ") {
+                    let skill_name = name.strip_prefix("use").unwrap().trim().to_string();
+                    if skill_name.is_empty() {
+                        Some(Command::SkillList)
+                    } else {
+                        Some(Command::SkillUse(skill_name))
+                    }
+                } else {
+                    Some(Command::SkillShow(name))
+                }
+            }
+            "/use" => {
+                let name = arg.unwrap_or_default();
+                if name.is_empty() {
+                    Some(Command::SkillList)
+                } else {
+                    Some(Command::SkillUse(name))
+                }
+            }
             _ => None,
         }
     }
@@ -265,6 +305,9 @@ impl CommandDispatcher {
             "/autoaccept",
             "/command",
             "/audit",
+            "/skills",
+            "/skill",
+            "/use",
         ]
     }
 
@@ -370,6 +413,13 @@ impl CommandDispatcher {
                 "/audit [last|session|clear]",
                 "View command execution audit log",
             ),
+            ("/skills", "List all available skills"),
+            ("/skill <name>", "Show details and content of a skill"),
+            (
+                "/skill use <name>",
+                "Activate a skill, injecting its instructions into the conversation",
+            ),
+            ("/use <name>", "Alias for /skill use <name>"),
         ]
     }
 
@@ -723,6 +773,37 @@ impl CommandDispatcher {
             Command::Audit(args) => {
                 audit::execute(&args);
                 Ok(CommandResult::Ok)
+            }
+            Command::SkillList => {
+                skill::execute_list(&self.skill_registry);
+                Ok(CommandResult::Ok)
+            }
+            Command::SkillShow(name) => {
+                let mut stdout = std::io::stdout();
+                skill::execute_show(&self.skill_registry, &name, &mut stdout);
+                Ok(CommandResult::Ok)
+            }
+            Command::SkillUse(name) => {
+                // Validate that the skill exists before returning
+                if self.skill_registry.get(&name).is_some() {
+                    Ok(CommandResult::SkillUse(name))
+                } else {
+                    let available = self
+                        .skill_registry
+                        .skills
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!(
+                        "{}Skill '{}' not found.{} Use {}/skills{} to list available skills.",
+                        RED, name, RESET, BOLD, RESET
+                    );
+                    if !available.is_empty() {
+                        println!("{}Available skills: {}{}{}", GRAY, CYAN, available, RESET);
+                    }
+                    Ok(CommandResult::Ok)
+                }
             }
         }
     }
