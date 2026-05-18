@@ -115,6 +115,13 @@ pub async fn run_agent_loop(
         .map(ContextWindowSize::Custom)
         .unwrap_or_else(ContextWindowSize::default_size);
 
+    // Track the last known prompt token count and the message count at that time.
+    // The LLM provider reports the exact tokenized size of the prompt on every call
+    // (Ollama: prompt_eval_count, OpenAI-compat: usage.prompt_tokens). We use that
+    // ground-truth value as long as the message count hasn't changed since it was
+    // recorded. Falls back to the heuristic estimate_conversation_tokens() otherwise.
+    let mut last_known_prompt_tokens: Option<(u32, usize)> = None;
+
     loop {
         // Clear any stale interrupt flag from a previous turn.
         interrupted.store(false, Ordering::SeqCst);
@@ -127,10 +134,14 @@ pub async fn run_agent_loop(
             AgentMode::Research => ORANGE,
         };
         let pinned_count = ctx.file_context.pinned_file_count();
+        let conversation_tokens = last_known_prompt_tokens
+            .filter(|(_, when_count)| *when_count == messages.len())
+            .map(|(tokens, _)| tokens)
+            .unwrap_or_else(|| estimate_conversation_tokens(messages));
         let status_line = display::format_context_status(
             messages.len(),
             pinned_count,
-            estimate_conversation_tokens(messages),
+            conversation_tokens,
             context_size,
         );
 
@@ -338,6 +349,9 @@ pub async fn run_agent_loop(
             if ctx.exit_requested {
                 break;
             }
+            // Any slash command may have mutated messages (system prompt changes,
+            // file pinning, mode switch, etc.) — invalidate the cached token count.
+            last_known_prompt_tokens = None;
             continue;
         }
 
@@ -400,6 +414,11 @@ pub async fn run_agent_loop(
 
                                 if msg.done {
                                     received_done = true;
+                                    // Capture the ground-truth prompt token count from the
+                                    // LLM provider (Ollama: prompt_eval_count, OpenAI-compat: usage).
+                                    if let Some(ref usage) = msg.usage {
+                                        last_known_prompt_tokens = Some((usage.prompt_tokens, messages.len()));
+                                    }
                                 }
 
                                 if msg.is_error {
