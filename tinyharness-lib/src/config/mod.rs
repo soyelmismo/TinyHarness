@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
@@ -278,4 +279,56 @@ pub fn save_settings(settings: &Settings) {
     if let Err(e) = store.save(settings) {
         eprintln!("Warning: Failed to save settings: {}", e);
     }
+}
+
+// ── Prompt file management ──────────────────────────────────────────────────
+
+/// Returns the directory where per-mode prompt `.md` files are stored.
+///
+/// Default: `~/.config/tinyharness/prompts/`
+pub fn prompts_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("tinyharness")
+        .join("prompts")
+}
+
+/// Ensure the prompts directory exists and is seeded with `.md` files
+/// containing the hardcoded defaults for each mode.
+///
+/// On first launch, this creates `~/.config/tinyharness/prompts/` and writes
+/// `casual.md`, `planning.md`, `agent.md`, and `research.md`.  Existing files
+/// are **never** overwritten — users can safely customize them.
+///
+/// Returns the prompts directory path.
+pub fn ensure_prompts_initialized() -> PathBuf {
+    let dir = prompts_dir();
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).ok();
+    }
+
+    let modes = [
+        AgentMode::Casual,
+        AgentMode::Planning,
+        AgentMode::Agent,
+        AgentMode::Research,
+    ];
+
+    for mode in &modes {
+        let file_path = dir.join(mode.prompts_filename());
+        if !file_path.exists() {
+            let default_text = mode.default_system_prompt();
+            // Write the default, trimming leading/trailing whitespace/newlines
+            if let Err(e) = std::fs::write(&file_path, default_text.trim()) {
+                eprintln!(
+                    "Warning: Failed to write default prompt to {}: {}",
+                    file_path.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    dir
 }

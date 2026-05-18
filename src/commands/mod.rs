@@ -381,6 +381,7 @@ pub fn build_registry() -> CommandRegistry {
 pub fn create_context(
     provider: Arc<Mutex<dyn Provider + Send + Sync>>,
     workspace_ctx: WorkspaceContext,
+    prompts_dir: std::path::PathBuf,
 ) -> CommandContext {
-    CommandContext::new(provider, workspace_ctx)
+    CommandContext::new(provider, workspace_ctx, prompts_dir)
 }
