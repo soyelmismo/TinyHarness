@@ -354,7 +354,74 @@ async fn stream_ollama_chat(
     send: &tokio::sync::mpsc::Sender<ChatMessageResponse>,
 ) -> Result<(), String> {
     let url = format!("{base_url}api/chat");
-    let request = serde_json::to_value(request).map_err(|e| format!("serialize: {e}"))?;
+    let mut request = serde_json::to_value(request).map_err(|e| format!("serialize: {e}"))?;
+
+    // Fix ollama-rs 0.3.4 serialization quirks for Ollama Cloud / Gemini compatibility:
+    //
+    // 1. ToolType::Function serializes as "Function" (uppercase F), but the
+    //    API spec requires lowercase "function". Ollama Cloud / Gemini rejects
+    //    the uppercase variant with "Invalid tool type". Fix by lowercasing.
+    // 2. "role": "tool" messages need a "name" field (tool_name) so Gemini
+    //    can match results to calls. ollama-rs doesn't add this, so we inject
+    //    it from the preceding assistant message's tool_calls.
+    fn fix_request_json(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                // Fix 1: Lowercase "Function" → "function" in tool definitions
+                if let Some(t) = map.get_mut("type")
+                    && t.as_str() == Some("Function")
+                {
+                    *t = serde_json::Value::String("function".to_string());
+                }
+                for v in map.values_mut() {
+                    fix_request_json(v);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                // Fix 2: Add "name" field to tool result messages by tracking
+                // tool_calls from the most recent assistant message
+                let mut prev_tool_names: Vec<String> = Vec::new();
+                for msg in arr.iter_mut() {
+                    if let serde_json::Value::Object(msg_map) = msg {
+                        let role = msg_map.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                        match role {
+                            "assistant" => {
+                                prev_tool_names.clear();
+                                if let Some(tcs) = msg_map.get("tool_calls")
+                                    && let Some(tc_arr) = tcs.as_array()
+                                {
+                                    for tc in tc_arr {
+                                        if let Some(name) = tc
+                                            .get("function")
+                                            .and_then(|f| f.get("name"))
+                                            .and_then(|n| n.as_str())
+                                        {
+                                            prev_tool_names.push(name.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            "tool"
+                                if !msg_map.contains_key("name") && prev_tool_names.len() == 1 =>
+                            {
+                                msg_map.insert(
+                                    "name".to_string(),
+                                    serde_json::Value::String(prev_tool_names[0].clone()),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Walk children for nested objects (e.g. tools array)
+                for v in arr.iter_mut() {
+                    fix_request_json(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    fix_request_json(&mut request);
 
     let response = client
         .post(&url)
