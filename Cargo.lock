@@ -1986,6 +1986,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyharness-ui"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "rustyline",
+ "serde_json",
+ "tinyharness-lib",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

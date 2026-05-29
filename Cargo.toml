@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "tinyharness-lib"]
+members = [".", "tinyharness-lib", "tinyharness-ui"]
 
 [package]
 name = "TinyHarness"
