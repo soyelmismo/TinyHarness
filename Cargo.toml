@@ -4,6 +4,8 @@ members = [".", "tinyharness-lib"]
 [package]
 name = "TinyHarness"
 version = "0.1.0"
+license = "MIT"
+description = "tinyharness - ai coding harness"
 edition = "2024"
 
 [[bin]]
