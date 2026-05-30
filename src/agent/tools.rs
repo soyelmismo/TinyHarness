@@ -707,7 +707,7 @@ async fn handle_auto_compact<W: Write>(
 
     let mut provider_guard = provider.lock().await;
 
-    match execute_compact(&mut *provider_guard, messages, focus).await {
+    match execute_compact(&mut ctx.output, &mut *provider_guard, messages, focus).await {
         Ok(token_usage) => {
             // Propagate token usage the same way /compact does:
             // 1) store in CommandContext so the agent loop updates the display

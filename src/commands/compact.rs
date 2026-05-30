@@ -1,4 +1,7 @@
+use std::io::Write;
+
 use tinyharness_lib::provider::{Message, Provider, Role, TokenUsage};
+use tinyharness_ui::output::Output;
 
 use crate::async_command;
 use crate::commands::registry::CommandResult;
@@ -15,8 +18,9 @@ async_command!(
         let focus = raw_arg.unwrap_or("").to_string();
         let provider = ctx.provider.clone();
         async move {
+            let mut out = Output::stdout();
             let mut p = provider.lock().await;
-            match execute_compact(&mut *p, messages, &focus).await {
+            match execute_compact(&mut out, &mut *p, messages, &focus).await {
                 Ok(tokens) => {
                     ctx.compaction_token_usage = tokens;
                     Ok(CommandResult::Ok)
@@ -182,16 +186,16 @@ struct CompactContext {
 /// This keeps the system prompt and the most recent messages intact,
 /// while replacing all intermediate messages with a single summary message.
 pub async fn execute_compact(
+    out: &mut Output,
     provider: &mut dyn Provider,
     messages: &mut Vec<Message>,
     focus: &str,
 ) -> Result<Option<TokenUsage>, String> {
     if messages.len() <= 6 {
-        println!(
-            "{}Not enough messages to compact (only {} messages).{}",
-            ORANGE,
+        let _ = writeln!(
+            out,
+            "{ORANGE}Not enough messages to compact (only {} messages).{RESET}",
             messages.len(),
-            RESET
         );
         return Ok(None);
     }
@@ -211,9 +215,9 @@ pub async fn execute_compact(
     let to_summarize: Vec<Message> = messages[1..keep_from].to_vec();
 
     if to_summarize.is_empty() {
-        println!(
-            "{}Nothing to compact — recent messages are the only ones present.{}",
-            ORANGE, RESET
+        let _ = writeln!(
+            out,
+            "{ORANGE}Nothing to compact — recent messages are the only ones present.{RESET}",
         );
         return Ok(None);
     }
@@ -229,14 +233,15 @@ pub async fn execute_compact(
     // Beyond that, use cascading multi-stage compaction.
     const SINGLE_PASS_LIMIT: usize = 200;
     if to_summarize.len() <= SINGLE_PASS_LIMIT {
-        compact_single_pass(provider, &to_summarize, messages, &ctx, focus).await
+        compact_single_pass(out, provider, &to_summarize, messages, &ctx, focus).await
     } else {
-        compact_cascade(provider, &to_summarize, messages, &ctx, focus).await
+        compact_cascade(out, provider, &to_summarize, messages, &ctx, focus).await
     }
 }
 
 /// Single-pass compaction: summarize all intermediate messages in one LLM call.
 async fn compact_single_pass(
+    out: &mut Output,
     provider: &mut dyn Provider,
     to_summarize: &[Message],
     messages: &mut Vec<Message>,
@@ -246,22 +251,22 @@ async fn compact_single_pass(
     let refs: Vec<&Message> = to_summarize.iter().collect();
     let summary_text = format_messages_for_summary(&refs);
 
-    println!(
-        "{}Compacting {} messages...{}",
-        BOLD,
+    let _ = writeln!(
+        out,
+        "{BOLD}Compacting {} messages...{RESET}",
         to_summarize.len(),
-        RESET
     );
 
     let (summary_content, token_usage) =
         call_llm_summarize(provider, &summary_text, focus, false).await?;
-    reconstruct_messages(messages, ctx, &summary_content);
+    reconstruct_messages(out, messages, ctx, &summary_content);
     Ok(token_usage)
 }
 
 /// Multi-stage cascade compaction: split intermediate messages into chunks,
 /// summarize each chunk, then merge the summaries.
 async fn compact_cascade(
+    out: &mut Output,
     provider: &mut dyn Provider,
     to_summarize: &[Message],
     messages: &mut Vec<Message>,
@@ -271,13 +276,12 @@ async fn compact_cascade(
     let chunk_size = messages_per_chunk(to_summarize.len());
     let total_stages = to_summarize.len().div_ceil(chunk_size);
 
-    println!(
-        "{}Cascading compaction: {} intermediate messages → {} stages ({} messages/stage){}",
-        BOLD,
+    let _ = writeln!(
+        out,
+        "{BOLD}Cascading compaction: {} intermediate messages → {} stages ({} messages/stage){RESET}",
         to_summarize.len(),
         total_stages,
         chunk_size,
-        RESET
     );
 
     let mut summaries: Vec<String> = Vec::new();
@@ -287,15 +291,14 @@ async fn compact_cascade(
         let end = (start + chunk_size).min(to_summarize.len());
         let chunk: Vec<&Message> = to_summarize[start..end].iter().collect();
 
-        println!(
-            "{}  Stage {}/{}: Compacting messages {}–{} ({} messages)...{}",
-            BOLD,
+        let _ = writeln!(
+            out,
+            "{BOLD}  Stage {}/{}: Compacting messages {}–{} ({} messages)...{RESET}",
             stage + 1,
             total_stages,
             start + 1,
             end,
             chunk.len(),
-            RESET
         );
 
         let chunk_text = format_messages_for_summary(&chunk);
@@ -303,13 +306,11 @@ async fn compact_cascade(
         match call_llm_summarize(provider, &chunk_text, focus, false).await {
             Ok((summary, _)) => summaries.push(summary),
             Err(e) => {
-                eprintln!(
-                    "{}  Stage {}/{} failed: {}{} — continuing with remaining stages.",
-                    ORANGE,
+                let _ = writeln!(
+                    out,
+                    "{ORANGE}  Stage {}/{} failed: {e}{RESET} — continuing with remaining stages.",
                     stage + 1,
                     total_stages,
-                    e,
-                    RESET
                 );
             }
         }
@@ -323,11 +324,10 @@ async fn compact_cascade(
 
     // Merge summaries if there are multiple
     let (final_summary, token_usage) = if summaries.len() > 1 {
-        println!(
-            "{}  Merging {} summaries into final summary...{}",
-            BOLD,
+        let _ = writeln!(
+            out,
+            "{BOLD}  Merging {} summaries into final summary...{RESET}",
             summaries.len(),
-            RESET
         );
 
         let merged_text = summaries.join("\n\n---\n\n");
@@ -336,9 +336,9 @@ async fn compact_cascade(
             Ok((merged, usage)) => (merged, usage),
             Err(_) => {
                 // Merge failed — fall back to concatenating raw summaries
-                eprintln!(
-                    "{}  Merge stage failed — using concatenated summaries as fallback.{}",
-                    ORANGE, RESET
+                let _ = writeln!(
+                    out,
+                    "{ORANGE}  Merge stage failed — using concatenated summaries as fallback.{RESET}",
                 );
                 let mut concatenated = String::from(
                     "[Compacted in multiple stages — each section is a summary of a conversation segment]\n\n",
@@ -354,13 +354,18 @@ async fn compact_cascade(
         (summaries.into_iter().next().unwrap(), None)
     };
 
-    reconstruct_messages(messages, ctx, &final_summary);
+    reconstruct_messages(out, messages, ctx, &final_summary);
     Ok(token_usage)
 }
 
 /// Reconstruct the messages vector after compaction:
 /// [system_prompt, summary_message, ...recent_messages]
-fn reconstruct_messages(messages: &mut Vec<Message>, ctx: &CompactContext, summary_content: &str) {
+fn reconstruct_messages(
+    out: &mut Output,
+    messages: &mut Vec<Message>,
+    ctx: &CompactContext,
+    summary_content: &str,
+) {
     let mut new_messages = Vec::new();
 
     // Keep system prompt
@@ -388,9 +393,9 @@ fn reconstruct_messages(messages: &mut Vec<Message>, ctx: &CompactContext, summa
     *messages = new_messages;
     let new_count = messages.len();
 
-    println!(
-        "{}Compacted: {} messages → {} messages{}",
-        GREEN, original_count, new_count, RESET
+    let _ = writeln!(
+        out,
+        "{GREEN}Compacted: {original_count} messages → {new_count} messages{RESET}",
     );
 }
 
@@ -541,7 +546,8 @@ mod tests {
             original_count: 9,
         };
 
-        reconstruct_messages(&mut messages, &ctx, "This is a summary.");
+        let mut out = Output::new(Box::new(Vec::new()));
+        reconstruct_messages(&mut out, &mut messages, &ctx, "This is a summary.");
 
         // Should have: system + summary + 4 recent = 6 messages
         assert_eq!(messages.len(), 6);

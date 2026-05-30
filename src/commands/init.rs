@@ -1,7 +1,9 @@
+use std::io::Write;
 use std::path::PathBuf;
 
 use tinyharness_lib::context::{PROJECT_MD_FILE_NAMES, WorkspaceContext};
 use tinyharness_lib::provider::{Message, Provider, Role};
+use tinyharness_ui::output::Output;
 
 use crate::async_command;
 use crate::commands::registry::CommandResult;
@@ -25,8 +27,9 @@ async_command!(
         let provider = ctx.provider.clone();
         let workspace_ctx = ctx.workspace_ctx.clone();
         async move {
+            let mut out = Output::stdout();
             let mut p = provider.lock().await;
-            let result = execute_init(&mut *p, &workspace_ctx, messages).await?;
+            let result = execute_init(&mut out, &mut *p, &workspace_ctx, messages).await?;
             Ok(CommandResult::Init(result))
         }
     }
@@ -41,6 +44,7 @@ async_command!(
 /// and generates/updates the instruction file with build commands, test
 /// instructions, project conventions, and architecture notes.
 pub async fn execute_init(
+    out: &mut Output,
     provider: &mut dyn Provider,
     workspace_ctx: &WorkspaceContext,
     _messages: &mut Vec<Message>,
@@ -54,19 +58,15 @@ pub async fn execute_init(
         Some((filename, path)) => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", filename, e))?;
-            println!(
-                "{}  Found existing {}{}{} ({} bytes). Updating...{}",
-                BOLD,
-                BLUE,
-                filename,
-                RESET,
+            let _ = writeln!(
+                out,
+                "{BOLD}  Found existing {BLUE}{filename}{RESET} ({} bytes). Updating...{RESET}",
                 content.len(),
-                RESET
             );
             ("Updating", Some(content))
         }
         None => {
-            println!("{}  Generating project instruction file...{}", BOLD, RESET);
+            let _ = writeln!(out, "{BOLD}  Generating project instruction file...{RESET}",);
             ("Creating", None)
         }
     };
@@ -92,7 +92,7 @@ pub async fn execute_init(
         },
     ];
 
-    println!("{}  {} — analyzing project...{}", CYAN, action_label, RESET);
+    let _ = writeln!(out, "{CYAN}  {action_label} — analyzing project...{RESET}",);
 
     // Call the provider to generate the content — no tools needed
     let tools = vec![];
@@ -134,45 +134,36 @@ pub async fn execute_init(
     let line_count = generated_content.lines().count();
     match action_label {
         "Creating" => {
-            println!(
-                "\n{}  ✦ Created {}{}{} ({} lines){}",
-                GREEN,
-                BLUE,
+            let _ = writeln!(
+                out,
+                "\n{GREEN}  ✦ Created {BLUE}{}{GREEN} ({line_count} lines){RESET}",
                 path.display(),
-                GREEN,
-                line_count,
-                RESET
             );
         }
         "Updating" => {
-            println!(
-                "\n{}  ✦ Updated {}{}{} ({} lines){}",
-                GREEN,
-                BLUE,
+            let _ = writeln!(
+                out,
+                "\n{GREEN}  ✦ Updated {BLUE}{}{GREEN} ({line_count} lines){RESET}",
                 path.display(),
-                GREEN,
-                line_count,
-                RESET
             );
         }
         _ => {}
     }
 
     // Print a preview of the first few lines
-    println!();
+    let _ = writeln!(out);
     let preview_lines: Vec<&str> = generated_content.lines().take(6).collect();
     for line in &preview_lines {
-        println!("{}  {}{}", GRAY, line, RESET);
+        let _ = writeln!(out, "{GRAY}  {line}{RESET}");
     }
     if generated_content.lines().count() > 6 {
-        println!(
-            "{}  ... ({} more lines){}",
-            GRAY,
+        let _ = writeln!(
+            out,
+            "{GRAY}  ... ({} more lines){RESET}",
             generated_content.lines().count() - 6,
-            RESET
         );
     }
-    println!();
+    let _ = writeln!(out);
 
     Ok(match existing {
         Some(_) => InitResult::Updated { path },
