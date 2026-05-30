@@ -1,6 +1,8 @@
 use std::collections::HashSet;
+use std::io::Write;
 
 use tinyharness_lib::config::{get_default_safe_commands, load_settings, save_settings};
+use tinyharness_ui::output::Output;
 
 use crate::commands::registry::CommandResult;
 use crate::style::*;
@@ -20,11 +22,11 @@ fn matches_safe_prefix(cmd: &str, safe_commands: &[String]) -> bool {
     false
 }
 
-pub fn execute(args: &str) -> Result<CommandResult, String> {
+pub fn execute(out: &mut Output, args: &str) -> Result<CommandResult, String> {
     let args = args.trim();
 
     if args.is_empty() {
-        execute_list();
+        execute_list(out);
         return Ok(CommandResult::Ok);
     }
 
@@ -40,25 +42,25 @@ pub fn execute(args: &str) -> Result<CommandResult, String> {
         .to_string();
 
     match sub.as_str() {
-        "add" => execute_add(&cmd_arg),
-        "rm" | "remove" => execute_remove(&cmd_arg),
-        "deny" => execute_deny(&cmd_arg),
-        "undeny" | "allow" => execute_undeny(&cmd_arg),
-        "list" | "ls" => execute_list(),
-        "reset" => execute_reset(),
-        "resetdeny" => execute_reset_deny(),
-        "help" => execute_help(),
-        _ => execute_list(),
+        "add" => execute_add(out, &cmd_arg),
+        "rm" | "remove" => execute_remove(out, &cmd_arg),
+        "deny" => execute_deny(out, &cmd_arg),
+        "undeny" | "allow" => execute_undeny(out, &cmd_arg),
+        "list" | "ls" => execute_list(out),
+        "reset" => execute_reset(out),
+        "resetdeny" => execute_reset_deny(out),
+        "help" => execute_help(out),
+        _ => execute_list(out),
     }
 
     Ok(CommandResult::Ok)
 }
 
-pub fn execute_add(cmd: &str) {
+pub fn execute_add(out: &mut Output, cmd: &str) {
     if cmd.is_empty() {
-        println!(
-            "{}Usage:{} /command add <command>{} — e.g. /command add docker",
-            BOLD, RESET, RESET
+        let _ = writeln!(
+            out,
+            "{BOLD}Usage:{RESET} /command add <command> — e.g. /command add docker",
         );
         return;
     }
@@ -67,9 +69,9 @@ pub fn execute_add(cmd: &str) {
     let mut commands = settings.get_safe_commands();
 
     if commands.contains(&cmd.to_string()) {
-        println!(
-            "{}Command '{}' is already in the safe list.{}",
-            ORANGE, cmd, RESET
+        let _ = writeln!(
+            out,
+            "{ORANGE}Command '{cmd}' is already in the safe list.{RESET}",
         );
         return;
     }
@@ -77,26 +79,26 @@ pub fn execute_add(cmd: &str) {
     // Warn if the command is also on the deny list
     let denied = settings.get_denied_commands();
     if denied.contains(&cmd.to_string()) {
-        println!(
-            "{}Note:{} '{}' is on the deny list. It will still be blocked until removed with {}/command undeny {}{}",
-            YELLOW, RESET, cmd, BOLD, cmd, RESET
+        let _ = writeln!(
+            out,
+            "{YELLOW}Note:{RESET} '{cmd}' is on the deny list. It will still be blocked until removed with {BOLD}/command undeny {cmd}{RESET}",
         );
     }
 
     commands.push(cmd.to_string());
     settings.safe_command_prefixes = Some(commands);
     save_settings(&settings);
-    println!(
-        "{}Added '{}' to auto-accepted commands.{}",
-        GREEN, cmd, RESET
+    let _ = writeln!(
+        out,
+        "{GREEN}Added '{cmd}' to auto-accepted commands.{RESET}",
     );
 }
 
-pub fn execute_remove(cmd: &str) {
+pub fn execute_remove(out: &mut Output, cmd: &str) {
     if cmd.is_empty() {
-        println!(
-            "{}Usage:{} /command rm <command>{} — e.g. /command rm docker",
-            BOLD, RESET, RESET
+        let _ = writeln!(
+            out,
+            "{BOLD}Usage:{RESET} /command rm <command> — e.g. /command rm docker",
         );
         return;
     }
@@ -114,23 +116,23 @@ pub fn execute_remove(cmd: &str) {
             Some(commands)
         };
         save_settings(&settings);
-        println!(
-            "{}Removed '{}' from auto-accepted commands.{}",
-            GREEN, cmd, RESET
+        let _ = writeln!(
+            out,
+            "{GREEN}Removed '{cmd}' from auto-accepted commands.{RESET}",
         );
     } else {
-        println!(
-            "{}Command '{}' not found in auto-accepted list.{}",
-            ORANGE, cmd, RESET
+        let _ = writeln!(
+            out,
+            "{ORANGE}Command '{cmd}' not found in auto-accepted list.{RESET}",
         );
     }
 }
 
-pub fn execute_deny(cmd: &str) {
+pub fn execute_deny(out: &mut Output, cmd: &str) {
     if cmd.is_empty() {
-        println!(
-            "{}Usage:{} /command deny <command>{} — e.g. /command deny git push",
-            BOLD, RESET, RESET
+        let _ = writeln!(
+            out,
+            "{BOLD}Usage:{RESET} /command deny <command> — e.g. /command deny git push",
         );
         return;
     }
@@ -139,9 +141,9 @@ pub fn execute_deny(cmd: &str) {
     let denied = settings.get_denied_commands();
 
     if denied.contains(&cmd.to_string()) {
-        println!(
-            "{}Command '{}' is already in the deny list.{}",
-            ORANGE, cmd, RESET
+        let _ = writeln!(
+            out,
+            "{ORANGE}Command '{cmd}' is already in the deny list.{RESET}",
         );
         return;
     }
@@ -149,15 +151,15 @@ pub fn execute_deny(cmd: &str) {
     // Warn if the command is currently auto-accepted (on safe list)
     let safe_commands = settings.get_safe_commands();
     if matches_safe_prefix(cmd, &safe_commands) {
-        println!(
-            "{}Note:{} '{}' is currently auto-accepted. Denying will override it — it will always require confirmation.{}",
-            YELLOW, RESET, cmd, RESET
+        let _ = writeln!(
+            out,
+            "{YELLOW}Note:{RESET} '{cmd}' is currently auto-accepted. Denying will override it — it will always require confirmation.{RESET}",
         );
     } else {
         // Warn if the command isn't on the safe list anyway
-        println!(
-            "{}Note:{} '{}' is not currently auto-accepted, so denying it has no practical effect.{}",
-            GRAY, RESET, cmd, RESET
+        let _ = writeln!(
+            out,
+            "{GRAY}Note:{RESET} '{cmd}' is not currently auto-accepted, so denying it has no practical effect.{RESET}",
         );
     }
 
@@ -165,17 +167,17 @@ pub fn execute_deny(cmd: &str) {
     denied.push(cmd.to_string());
     settings.denied_command_prefixes = Some(denied);
     save_settings(&settings);
-    println!(
-        "{}Denied '{}' — it will always require confirmation.{}",
-        RED, cmd, RESET
+    let _ = writeln!(
+        out,
+        "{RED}Denied '{cmd}' — it will always require confirmation.{RESET}",
     );
 }
 
-pub fn execute_undeny(cmd: &str) {
+pub fn execute_undeny(out: &mut Output, cmd: &str) {
     if cmd.is_empty() {
-        println!(
-            "{}Usage:{} /command undeny <command>{} — e.g. /command undeny git push",
-            BOLD, RESET, RESET
+        let _ = writeln!(
+            out,
+            "{BOLD}Usage:{RESET} /command undeny <command> — e.g. /command undeny git push",
         );
         return;
     }
@@ -193,11 +195,11 @@ pub fn execute_undeny(cmd: &str) {
             Some(denied)
         };
         save_settings(&settings);
-        println!("{}Removed '{}' from the deny list.{}", GREEN, cmd, RESET);
+        let _ = writeln!(out, "{GREEN}Removed '{cmd}' from the deny list.{RESET}",);
     } else {
-        println!(
-            "{}Command '{}' not found in the deny list.{}",
-            ORANGE, cmd, RESET
+        let _ = writeln!(
+            out,
+            "{ORANGE}Command '{cmd}' not found in the deny list.{RESET}",
         );
     }
 }
@@ -243,7 +245,7 @@ pub fn format_denied_command_rows(cmds: &[&str]) -> Vec<String> {
     rows
 }
 
-pub fn execute_list() {
+pub fn execute_list(out: &mut Output) {
     let settings = load_settings();
     let safe_commands = settings.get_safe_commands();
     let denied = settings.get_denied_commands();
@@ -262,31 +264,22 @@ pub fn execute_list() {
             .count()
     };
 
-    println!();
-    println!(
-        "{}╭─ Auto-Accepted Commands ─────────────────────╮{}",
-        BOLD, RESET
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{BOLD}╭─ Auto-Accepted Commands ─────────────────────╮{RESET}",
     );
     if using_defaults {
-        println!(
-            "{}│{} {}Using defaults{} ({} commands){}",
-            BOLD,
-            RESET,
-            GRAY,
-            RESET,
+        let _ = writeln!(
+            out,
+            "{BOLD}│{RESET} {GRAY}Using defaults{RESET} ({}) commands",
             safe_commands.len(),
-            RESET
         );
     } else {
-        println!(
-            "{}│{} {}{}{} configured ({} custom){}",
-            BOLD,
-            RESET,
-            BLUE,
+        let _ = writeln!(
+            out,
+            "{BOLD}│{RESET} {BLUE}{}{RESET} configured ({custom_count} custom)",
             safe_commands.len(),
-            RESET,
-            custom_count,
-            RESET
         );
     }
 
@@ -307,119 +300,120 @@ pub fn execute_list() {
     // Format and print rows
     let rows = format_command_rows(&cmd_refs, &markers);
     for row in &rows {
-        println!("{}│{}   {}", BOLD, RESET, row);
+        let _ = writeln!(out, "{BOLD}│{RESET}   {row}");
     }
 
     // Legend
     if !using_defaults {
-        println!(
-            "{}│{}   {}· {}default{}  {}+ {}custom{}",
-            BOLD, RESET, GRAY, RESET, GRAY, GREEN, RESET, RESET
+        let _ = writeln!(
+            out,
+            "{BOLD}│{RESET}   {GRAY}· default{RESET}  {GREEN}+ custom{RESET}",
         );
     }
 
-    println!(
-        "{}╰──────────────────────────────────────────────╯{}",
-        BOLD, RESET
+    let _ = writeln!(
+        out,
+        "{BOLD}╰──────────────────────────────────────────────╯{RESET}",
     );
 
     if !denied.is_empty() {
         let denied_refs: Vec<&str> = denied.iter().map(|s| s.as_str()).collect();
         let denied_rows = format_denied_command_rows(&denied_refs);
 
-        println!();
-        println!(
-            "{}╭─ Always-Deny Commands ──────────────────────╮{}",
-            BOLD, RESET
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "{BOLD}╭─ Always-Deny Commands ──────────────────────╮{RESET}",
         );
-        println!(
-            "{}│{} {}{}{} commands denied (always require confirmation){}",
-            BOLD,
-            RESET,
-            RED,
+        let _ = writeln!(
+            out,
+            "{BOLD}│{RESET} {RED}{}{RESET} commands denied (always require confirmation)",
             denied.len(),
-            RESET,
-            RESET
         );
         for row in &denied_rows {
-            println!("{}│{}   {}", BOLD, RESET, row);
+            let _ = writeln!(out, "{BOLD}│{RESET}   {row}");
         }
-        println!(
-            "{}╰──────────────────────────────────────────────╯{}",
-            BOLD, RESET
+        let _ = writeln!(
+            out,
+            "{BOLD}╰──────────────────────────────────────────────╯{RESET}",
         );
     }
 
-    println!();
+    let _ = writeln!(out);
 }
 
-pub fn execute_help() {
-    println!();
-    println!("{}Command management — subcommands:{}", BOLD, RESET);
-    println!();
-    println!(
-        "  {}{:<16}{} Show auto-accepted and denied commands",
-        CYAN, "list", RESET
+pub fn execute_help(out: &mut Output) {
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{BOLD}Command management — subcommands:{RESET}",);
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "  {CYAN}{0:<16}{RESET} Show auto-accepted and denied commands",
+        "list",
     );
-    println!(
-        "  {}{:<16}{} Add a command to the auto-accept list",
-        CYAN, "add <cmd>", RESET
+    let _ = writeln!(
+        out,
+        "  {CYAN}{0:<16}{RESET} Add a command to the auto-accept list",
+        "add <cmd>",
     );
-    println!(
-        "  {}{:<16}{} Remove a command from the auto-accept list",
-        CYAN, "rm <cmd>", RESET
+    let _ = writeln!(
+        out,
+        "  {CYAN}{0:<16}{RESET} Remove a command from the auto-accept list",
+        "rm <cmd>",
     );
-    println!(
-        "  {}{:<16}{} Always require confirmation for a command",
-        CYAN, "deny <cmd>", RESET
+    let _ = writeln!(
+        out,
+        "  {CYAN}{0:<16}{RESET} Always require confirmation for a command",
+        "deny <cmd>",
     );
-    println!(
-        "  {}{:<16}{} Remove a command from the deny list",
-        CYAN, "undeny <cmd>", RESET
+    let _ = writeln!(
+        out,
+        "  {CYAN}{0:<16}{RESET} Remove a command from the deny list",
+        "undeny <cmd>",
     );
-    println!(
-        "  {}{:<16}{} Reset auto-accepted commands to defaults",
-        CYAN, "reset", RESET
+    let _ = writeln!(
+        out,
+        "  {CYAN}{0:<16}{RESET} Reset auto-accepted commands to defaults",
+        "reset",
     );
-    println!(
-        "  {}{:<16}{} Clear the entire deny list",
-        CYAN, "resetdeny", RESET
+    let _ = writeln!(
+        out,
+        "  {CYAN}{0:<16}{RESET} Clear the entire deny list",
+        "resetdeny",
     );
-    println!("  {}{:<16}{} Show this help message", CYAN, "help", RESET);
-    println!();
-    println!(
-        "{}Tip:{} Use {}/settings all{} to see all safe commands in detail.",
-        GRAY, RESET, BOLD, RESET
+    let _ = writeln!(out, "  {CYAN}{0:<16}{RESET} Show this help message", "help",);
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{GRAY}Tip:{RESET} Use {BOLD}/settings all{RESET} to see all safe commands in detail.",
     );
-    println!();
+    let _ = writeln!(out);
 }
 
-pub fn execute_reset() {
+pub fn execute_reset(out: &mut Output) {
     let mut settings = load_settings();
     let defaults = get_default_safe_commands();
     let count = defaults.len();
     settings.safe_command_prefixes = None;
     save_settings(&settings);
-    println!(
-        "{}Reset auto-accepted commands to defaults ({} commands).{}",
-        GREEN, count, RESET
+    let _ = writeln!(
+        out,
+        "{GREEN}Reset auto-accepted commands to defaults ({count} commands).{RESET}",
     );
 }
 
-pub fn execute_reset_deny() {
+pub fn execute_reset_deny(out: &mut Output) {
     let mut settings = load_settings();
     if settings.get_denied_commands().is_empty() {
-        println!("{}Deny list is already empty.{}", ORANGE, RESET);
+        let _ = writeln!(out, "{ORANGE}Deny list is already empty.{RESET}");
         return;
     }
     let count = settings.get_denied_commands().len();
     settings.denied_command_prefixes = None;
     save_settings(&settings);
-    println!(
-        "{}Cleared deny list (removed {} command{}).{}",
-        GREEN,
-        count,
+    let _ = writeln!(
+        out,
+        "{GREEN}Cleared deny list (removed {count} command{}).{RESET}",
         if count == 1 { "" } else { "s" },
-        RESET
     );
 }

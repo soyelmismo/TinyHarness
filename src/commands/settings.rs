@@ -1,45 +1,49 @@
 use std::collections::HashSet;
+use std::io::Write;
 
 use tinyharness_lib::config::load_settings;
+use tinyharness_ui::output::Output;
 
 use crate::commands::registry::CommandResult;
 use crate::style::*;
 
-pub fn execute(arg: Option<&str>) -> Result<CommandResult, String> {
+pub fn execute(out: &mut Output, arg: Option<&str>) -> Result<CommandResult, String> {
     match arg {
-        Some(sub) if sub.to_lowercase() == "all" => execute_all(&load_settings()),
+        Some(sub) if sub.to_lowercase() == "all" => execute_all(out, &load_settings()),
         Some(other) => {
-            println!(
-                "{}Unknown argument '{}'.{} Use {}/settings{} to show settings or {}/settings all{} to list all safe commands.",
-                ORANGE, other, RESET, BOLD, RESET, BOLD, RESET
+            let _ = writeln!(
+                out,
+                "{ORANGE}Unknown argument '{other}'.{RESET} Use {BOLD}/settings{RESET} to show settings or {BOLD}/settings all{RESET} to list all safe commands.",
             );
         }
-        None => execute_summary(&load_settings()),
+        None => execute_summary(out, &load_settings()),
     }
     Ok(CommandResult::Ok)
 }
 
-fn execute_summary(settings: &tinyharness_lib::config::Settings) {
-    println!();
-    println!(
-        "{}╭─ Settings ─────────────────────────────────╮{}",
-        BOLD, RESET
+fn execute_summary(out: &mut Output, settings: &tinyharness_lib::config::Settings) {
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{BOLD}╭─ Settings ─────────────────────────────────╮{RESET}",
     );
 
     let provider_str = format!("{}", settings.last_provider);
-    println!(
-        "{}│{} Provider:  {}{}{}",
-        BOLD, RESET, BLUE, provider_str, RESET
-    );
+    let _ = writeln!(out, "{BOLD}│{RESET} Provider:  {BLUE}{provider_str}{RESET}",);
 
     match &settings.last_model {
-        Some(model) => println!("{}│{} Model:     {}{}{}", BOLD, RESET, BLUE, model, RESET),
-        None => println!("{}│{} Model:     {}none{}", BOLD, RESET, ORANGE, RESET),
+        Some(model) => {
+            let _ = writeln!(out, "{BOLD}│{RESET} Model:     {BLUE}{model}{RESET}");
+        }
+        None => {
+            let _ = writeln!(out, "{BOLD}│{RESET} Model:     {ORANGE}none{RESET}");
+        }
     }
 
-    println!(
-        "{}│{} Mode:      {}{}{}",
-        BOLD, RESET, BLUE, settings.preferred_mode, RESET
+    let _ = writeln!(
+        out,
+        "{BOLD}│{RESET} Mode:      {BLUE}{}{RESET}",
+        settings.preferred_mode,
     );
 
     match &settings.ollama_api_key {
@@ -49,77 +53,69 @@ fn execute_summary(settings: &tinyharness_lib::config::Settings) {
             } else {
                 "****".to_string()
             };
-            println!("{}│{} API Key:   {}{}{}", BOLD, RESET, BLUE, masked, RESET);
+            let _ = writeln!(out, "{BOLD}│{RESET} API Key:   {BLUE}{masked}{RESET}");
         }
-        None => println!("{}│{} API Key:   {}not set{}", BOLD, RESET, ORANGE, RESET),
+        None => {
+            let _ = writeln!(out, "{BOLD}│{RESET} API Key:   {ORANGE}not set{RESET}");
+        }
     }
 
-    println!(
-        "{}│{} Timeout:   {}{}s{}",
-        BOLD, RESET, BLUE, settings.ollama_timeout_secs, RESET
+    let _ = writeln!(
+        out,
+        "{BOLD}│{RESET} Timeout:   {BLUE}{}s{RESET}",
+        settings.ollama_timeout_secs,
     );
-    println!(
-        "{}│{} Retries:   {}{}{}",
-        BOLD, RESET, BLUE, settings.ollama_max_retries, RESET
+    let _ = writeln!(
+        out,
+        "{BOLD}│{RESET} Retries:   {BLUE}{}{RESET}",
+        settings.ollama_max_retries,
     );
 
     match settings.context_limit {
-        Some(limit) => println!(
-            "{}│{} Ctx Limit: {}{} tokens{}",
-            BOLD, RESET, BLUE, limit, RESET
-        ),
-        None => println!(
-            "{}│{} Ctx Limit: {}auto (model default){}",
-            BOLD, RESET, GRAY, RESET
-        ),
+        Some(limit) => {
+            let _ = writeln!(out, "{BOLD}│{RESET} Ctx Limit: {BLUE}{limit} tokens{RESET}",);
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "{BOLD}│{RESET} Ctx Limit: {GRAY}auto (model default){RESET}",
+            );
+        }
     }
 
-    let auto_accept_str = if settings.auto_accept_safe_commands {
-        "enabled"
+    let (auto_accept_str, auto_accept_color) = if settings.auto_accept_safe_commands {
+        ("enabled", GREEN)
     } else {
-        "disabled"
+        ("disabled", ORANGE)
     };
-    let auto_accept_color = if settings.auto_accept_safe_commands {
-        GREEN
-    } else {
-        ORANGE
-    };
-    println!(
-        "{}│{} Auto-Accept: {}{}{} (safe commands)",
-        BOLD, RESET, auto_accept_color, auto_accept_str, RESET
+    let _ = writeln!(
+        out,
+        "{BOLD}│{RESET} Auto-Accept: {auto_accept_color}{auto_accept_str}{RESET} (safe commands)",
     );
 
     let safe_commands = settings.get_safe_commands();
     let denied_commands = settings.get_denied_commands();
-    println!(
-        "{}│{} Safe Cmds:  {}{}{} configured (use {}/settings all{} to list all)",
-        BOLD,
-        RESET,
-        BLUE,
+    let _ = writeln!(
+        out,
+        "{BOLD}│{RESET} Safe Cmds:  {BLUE}{}{RESET} configured (use {BOLD}/settings all{RESET} to list all)",
         safe_commands.len(),
-        RESET,
-        BOLD,
-        RESET
     );
     if !denied_commands.is_empty() {
-        println!(
-            "{}│{} Denied Cmds: {}{}{} always denied",
-            BOLD,
-            RED,
+        let _ = writeln!(
+            out,
+            "{BOLD}│{RESET} Denied Cmds: {RED}{}{RESET} always denied",
             denied_commands.len(),
-            RESET,
-            RESET
         );
     }
 
-    println!(
-        "{}╰────────────────────────────────────────────╯{}",
-        BOLD, RESET
+    let _ = writeln!(
+        out,
+        "{BOLD}╰────────────────────────────────────────────╯{RESET}",
     );
-    println!();
+    let _ = writeln!(out);
 }
 
-fn execute_all(settings: &tinyharness_lib::config::Settings) {
+fn execute_all(out: &mut Output, settings: &tinyharness_lib::config::Settings) {
     let safe_commands = settings.get_safe_commands();
     let denied_commands = settings.get_denied_commands();
     let using_defaults = settings.safe_command_prefixes.is_none();
@@ -136,21 +132,18 @@ fn execute_all(settings: &tinyharness_lib::config::Settings) {
             .count()
     };
 
-    println!();
+    let _ = writeln!(out);
     if using_defaults {
-        println!(
-            "{}╭─ All Safe Commands ({} defaults) ────────────╮{}",
-            BOLD,
+        let _ = writeln!(
+            out,
+            "{BOLD}╭─ All Safe Commands ({0} defaults) ────────────╮{RESET}",
             safe_commands.len(),
-            RESET
         );
     } else {
-        println!(
-            "{}╭─ All Safe Commands ({} configured, {} custom) ─╮{}",
-            BOLD,
+        let _ = writeln!(
+            out,
+            "{BOLD}╭─ All Safe Commands ({0} configured, {custom_count} custom) ─╮{RESET}",
             safe_commands.len(),
-            custom_count,
-            RESET
         );
     }
 
@@ -169,40 +162,39 @@ fn execute_all(settings: &tinyharness_lib::config::Settings) {
 
     let rows = crate::commands::command::format_command_rows(&cmds, &markers);
     for row in &rows {
-        println!("{}│{}   {}", BOLD, RESET, row);
+        let _ = writeln!(out, "{BOLD}│{RESET}   {row}");
     }
 
     if !using_defaults {
-        println!(
-            "{}│{}   {}· {}default{}  {}+ {}custom{}",
-            BOLD, RESET, GRAY, RESET, GRAY, GREEN, RESET, RESET
+        let _ = writeln!(
+            out,
+            "{BOLD}│{RESET}   {GRAY}· default{RESET}  {GREEN}+ custom{RESET}",
         );
     }
 
-    println!(
-        "{}╰───────────────────────────────────────────────╯{}",
-        BOLD, RESET
+    let _ = writeln!(
+        out,
+        "{BOLD}╰───────────────────────────────────────────────╯{RESET}",
     );
 
     if !denied_commands.is_empty() {
         let denied_refs: Vec<&str> = denied_commands.iter().map(|s| s.as_str()).collect();
         let denied_rows = crate::commands::command::format_denied_command_rows(&denied_refs);
 
-        println!();
-        println!(
-            "{}╭─ Always-Deny Commands ({} configured) ────────╮{}",
-            BOLD,
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "{BOLD}╭─ Always-Deny Commands ({0} configured) ────────╮{RESET}",
             denied_commands.len(),
-            RESET
         );
         for row in &denied_rows {
-            println!("{}│{}   {}", BOLD, RESET, row);
+            let _ = writeln!(out, "{BOLD}│{RESET}   {row}");
         }
-        println!(
-            "{}╰───────────────────────────────────────────────╯{}",
-            BOLD, RESET
+        let _ = writeln!(
+            out,
+            "{BOLD}╰───────────────────────────────────────────────╯{RESET}",
         );
     }
 
-    println!();
+    let _ = writeln!(out);
 }

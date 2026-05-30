@@ -97,7 +97,7 @@ pub fn build_registry() -> CommandRegistry {
         "/settings",
         "Show current settings. Use 'all' to list all safe commands.",
         "/settings [all]",
-        |arg, _ctx, _msg| crate::commands::settings::execute(arg),
+        |arg, ctx, _msg| crate::commands::settings::execute(&mut ctx.output, arg),
     );
 
     reg.register_sync_with_usage(
@@ -146,7 +146,7 @@ pub fn build_registry() -> CommandRegistry {
         "/command",
         "Manage auto-accepted and denied commands",
         "/command [list|add|rm|deny|undeny|reset|resetdeny|help]",
-        |arg, _ctx, _msg| crate::commands::command::execute(arg.unwrap_or("")),
+        |arg, ctx, _msg| crate::commands::command::execute(&mut ctx.output, arg.unwrap_or("")),
     );
 
     // ── Audit ──────────────────────────────────────────────────────────────
