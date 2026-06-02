@@ -112,6 +112,9 @@ impl OpenAiCompatInner {
             model,
             messages: openai_messages,
             stream: true,
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
             tools: openai_tools,
         };
 
@@ -131,8 +134,15 @@ pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<OpenAIMessage>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<OpenAITool>,
+}
+
+#[derive(Serialize)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 #[derive(Serialize)]

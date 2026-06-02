@@ -88,6 +88,11 @@ impl FromStr for OllamaThinkType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub last_provider: ProviderKind,
+    /// Last URL used for the active provider. Set automatically by `--config`
+    /// or by passing `--url`. Persisted so subsequent runs don't re-prompt.
+    /// (default: None)
+    #[serde(default)]
+    pub last_provider_url: Option<String>,
     pub last_model: Option<String>,
     pub preferred_mode: AgentMode,
     pub ollama_api_key: Option<String>,
@@ -114,6 +119,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             last_provider: ProviderKind::Ollama,
+            last_provider_url: None,
             last_model: None,
             preferred_mode: AgentMode::Casual,
             ollama_api_key: None,

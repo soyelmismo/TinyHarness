@@ -20,6 +20,7 @@ use tinyharness_lib::{
     tools::ToolManager,
 };
 
+use crate::agent::setup as agent_setup;
 use crate::{agent::run_agent_loop, commands::CommandContext};
 use clap::Parser;
 use tinyharness_ui::output::Output;
@@ -39,15 +40,15 @@ struct Args {
     /// Continue the most recent session in the current directory.
     #[arg(short, long)]
     r#continue: bool,
-}
-
-/// Return the default URL for a given provider kind.
-fn default_url_for_provider(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::LlamaCpp => "http://127.0.0.1:8080",
-        ProviderKind::Vllm => "http://127.0.0.1:8000",
-        ProviderKind::Ollama => "http://127.0.0.1:11434",
-    }
+    /// Run interactive provider setup: pick a provider, enter a URL, save to
+    /// settings. Exits when done.
+    #[arg(long)]
+    config: bool,
+    /// Start the conversation with this prompt instead of waiting for input.
+    /// Use `-p` for short flags. The agent then drops into the normal
+    /// interactive loop for follow-up turns.
+    #[arg(short = 'p', long = "prompt")]
+    prompt: Option<String>,
 }
 
 /// Determine the provider kind from CLI flags or saved settings.
@@ -198,18 +199,53 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let args = Args::parse();
 
+    // -- Handle --config: interactive provider setup, then exit ───────────────
+    if args.config {
+        let mut out = Output::stdout();
+        let result = agent_setup::interactive_setup(&mut out);
+        match result {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let mut err_out = Output::stderr();
+                let _ = writeln!(err_out, "{BOLD}Error:{RESET} {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Load saved settings (will be used as defaults when no CLI flags are given)
     let settings = load_settings();
 
     // Determine which provider to use: CLI flags override saved settings
     let provider_kind = resolve_provider_kind(&args, &settings);
+
+    // Resolve URL: CLI > saved > default. If a provider flag was passed without
+    // --url, prompt interactively (requires a TTY) and persist the result.
     let url = if args.url.is_empty() {
-        default_url_for_provider(provider_kind).to_string()
+        let cli_provider_flag_set = args.ollama || args.llama_cpp || args.vllm;
+        if cli_provider_flag_set {
+            // User explicitly chose a provider without a URL — ask for it
+            // interactively so the saved URL stays in sync.
+            let default = agent_setup::default_url_for(provider_kind);
+            let mut out = Output::stdout();
+            let url = match agent_setup::prompt_for_url(&mut out, provider_kind, default) {
+                Ok(u) => u,
+                Err(e) => {
+                    let mut err_out = Output::stderr();
+                    let _ = writeln!(err_out, "{BOLD}Error:{RESET} {e}");
+                    std::process::exit(1);
+                }
+            };
+            agent_setup::save_provider_settings(provider_kind, &url);
+            url
+        } else {
+            agent_setup::resolve_url(provider_kind, &args.url, &settings)
+        }
     } else {
         args.url.clone()
     };
 
-    let provider = create_provider(provider_kind, url, &settings).await;
+    let provider = create_provider(provider_kind, url.clone(), &settings).await;
 
     // Auto-select model if none is currently set
     {
@@ -217,12 +253,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         auto_select_model(&mut *p, settings.last_model.as_ref()).await;
     }
 
-    // Save the provider kind now that we know which one is active
+    // Save the provider kind + URL now that we know which one is active.
+    // We persist whenever anything was explicitly chosen via CLI (provider
+    // flag or --url) so the next run doesn't have to re-prompt. The
+    // URL-resolution block above already calls `save_provider_settings` when
+    // a provider flag was passed without --url, so we only need to cover
+    // the remaining cases here.
     let mut settings = settings;
-    if settings.last_provider != provider_kind {
-        settings.last_provider = provider_kind;
+    let explicit_provider = args.ollama || args.llama_cpp || args.vllm;
+    if explicit_provider && !args.url.is_empty() {
+        // User gave both --ollama/--llama-cpp/--vllm and --url. Persist both.
+        if settings.last_provider != provider_kind {
+            settings.last_provider = provider_kind;
+        }
+        settings.last_provider_url = Some(url.clone());
+        save_settings(&settings);
+    } else if !explicit_provider && !args.url.is_empty() {
+        // User gave --url only (provider resolved from saved settings).
+        settings.last_provider_url = Some(url.clone());
         save_settings(&settings);
     }
+    // else: no CLI override — leave settings as they are.
 
     // ── Collect workspace context ──────────────────────────────────────────
     let workspace_ctx = WorkspaceContext::collect();
@@ -309,6 +360,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &mut ctx,
         &mut session,
         &interrupted,
+        args.prompt.as_deref(),
     )
     .await
 }

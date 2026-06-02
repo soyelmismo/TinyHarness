@@ -1,6 +1,7 @@
 pub mod display;
 pub mod input;
 pub mod safety;
+pub mod setup;
 pub mod tools;
 
 use std::{
@@ -45,6 +46,7 @@ pub async fn run_agent_loop(
     ctx: &mut CommandContext,
     session: &mut Session,
     interrupted: &Arc<AtomicBool>,
+    initial_prompt: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     // Build the command registry once at startup
     let registry = build_registry();
@@ -127,6 +129,13 @@ pub async fn run_agent_loop(
     let mut last_known_token_usage: Option<tinyharness_lib::provider::TokenUsage> =
         session.meta().token_usage.clone();
 
+    // If the user passed --prompt / -p, treat it as the first user message.
+    // We materialize it into a local `pending_user_input` buffer that the
+    // input-reading block below drains on the first iteration. This lets the
+    // rest of the loop body (the LLM-call flow, tool handling, etc.) run
+    // unmodified for the initial turn.
+    let mut pending_user_input: Option<String> = initial_prompt.map(|s| s.to_string());
+
     loop {
         // Clear any stale interrupt flag from a previous turn.
         interrupted.store(false, Ordering::SeqCst);
@@ -184,14 +193,20 @@ pub async fn run_agent_loop(
             mode_color, mode_label, RESET, model_suffix, BLUE, RESET
         );
 
-        // Read input with support for multi-line continuation
-        let user_input = read_multiline_input(
-            &mut rl,
-            &prompt,
-            &continuation_prompt,
-            interrupted,
-            &mut stdout,
-        )?;
+        // Read input with support for multi-line continuation. If we have
+        // a pending user input (e.g. from --prompt on the first iteration),
+        // use that and skip rustyline.
+        let user_input = if let Some(pending) = pending_user_input.take() {
+            Some(pending)
+        } else {
+            read_multiline_input(
+                &mut rl,
+                &prompt,
+                &continuation_prompt,
+                interrupted,
+                &mut stdout,
+            )?
+        };
 
         if user_input.is_none() {
             // EOF or error - exit
