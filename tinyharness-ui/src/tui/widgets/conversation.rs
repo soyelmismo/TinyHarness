@@ -30,6 +30,8 @@ pub enum ConversationLine {
     Thinking { text: String },
     /// A horizontal separator line.
     Separator,
+    /// A confirmation prompt for a tool call, awaiting user y/n/a response.
+    ConfirmPrompt { name: String, args_summary: String },
 }
 
 /// Scrollable conversation pane.
@@ -101,6 +103,7 @@ impl ConversationWidget {
             }
             ConversationLine::ToolCall { .. } => return 1,
             ConversationLine::Separator => return 1,
+            ConversationLine::ConfirmPrompt { .. } => return 1,
         };
 
         self.line_height_for_text(text, prefix_len, area_width)
@@ -447,6 +450,30 @@ impl ConversationWidget {
                     );
                 }
             }
+            ConversationLine::ConfirmPrompt { name, args_summary } => {
+                if skip_top == 0 && start_row <= max_row {
+                    let prompt = format!("  ⚠ Confirm {} {}", name, args_summary);
+                    let suffix = " [y/n/a]?";
+                    screen.write_str(
+                        start_row,
+                        area.x,
+                        &prompt,
+                        Color::YELLOW,
+                        Color::Default,
+                        Style::bold(),
+                    );
+                    let prompt_end =
+                        area.x + prompt.len().min(area.width as usize - suffix.len()) as u16;
+                    screen.write_str(
+                        start_row,
+                        prompt_end,
+                        suffix,
+                        Color::YELLOW,
+                        Color::Default,
+                        Style::default(),
+                    );
+                }
+            }
         }
     }
 
@@ -693,5 +720,26 @@ mod tests {
             "Long text should wrap to multiple rows, got {}",
             height
         );
+    }
+
+    #[test]
+    fn test_confirm_prompt_line_height() {
+        let conv = ConversationWidget::new();
+        let line = ConversationLine::ConfirmPrompt {
+            name: "run".to_string(),
+            args_summary: "cargo test".to_string(),
+        };
+        // ConfirmPrompt always takes 1 row
+        assert_eq!(conv.line_height(&line, 80), 1);
+    }
+
+    #[test]
+    fn test_confirm_prompt_push() {
+        let mut conv = ConversationWidget::new();
+        conv.push(ConversationLine::ConfirmPrompt {
+            name: "run".to_string(),
+            args_summary: "cargo build".to_string(),
+        });
+        assert_eq!(conv.lines.len(), 1);
     }
 }

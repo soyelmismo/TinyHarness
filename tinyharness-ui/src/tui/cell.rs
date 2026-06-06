@@ -100,6 +100,7 @@ pub struct Style {
     pub dim: bool,
     pub italic: bool,
     pub underline: bool,
+    pub blink: bool,
 }
 
 impl Style {
@@ -129,6 +130,13 @@ impl Style {
         }
     }
 
+    pub fn blink() -> Self {
+        Self {
+            blink: true,
+            ..Self::default()
+        }
+    }
+
     /// Generate the ANSI escape sequences for this style.
     pub fn escape(&self) -> String {
         let mut parts = Vec::new();
@@ -143,6 +151,9 @@ impl Style {
         }
         if self.underline {
             parts.push("\x1b[4m");
+        }
+        if self.blink {
+            parts.push("\x1b[5m");
         }
         parts.join("")
     }
@@ -267,6 +278,7 @@ mod tests {
             dim: false,
             italic: true,
             underline: false,
+            blink: false,
         };
         assert_eq!(s.escape(), "\x1b[1m\x1b[3m");
     }

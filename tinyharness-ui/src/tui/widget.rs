@@ -32,10 +32,18 @@ pub enum Action {
     PageDown,
     /// Toggle sidebar visibility.
     ToggleSidebar,
-    /// Toggle between CLI and TUI mode.
-    ToggleMode,
+    /// Cycle focus forward (Tab without command input).
+    CycleFocusForward,
+    /// Cycle focus backward (Shift+Tab).
+    CycleFocusBackward,
     /// Quit the application.
     Quit,
+    /// User approved a tool confirmation (pressed 'y').
+    ConfirmYes,
+    /// User denied a tool confirmation (pressed 'n').
+    ConfirmNo,
+    /// User approved all future tool confirmations (pressed 'a').
+    ConfirmAll,
     /// No action — the event was handled internally.
     None,
 }

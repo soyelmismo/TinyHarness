@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use super::TuiAgentEvent;
 use super::backend::Backend;
-use super::event::{Event, EventParser, Key, KeyEvent, Modifiers, MouseEvent};
+use super::event::{Event, EventParser, Key, KeyEvent, MouseEvent};
 use super::layout::{Constraint, Direction, Layout, Rect};
 use super::screen::Screen;
 use super::terminal::Terminal;
@@ -116,6 +116,8 @@ pub struct TuiApp<B: Backend> {
     is_thinking: bool,
     /// Accumulated thinking text for the current thinking phase.
     thinking_text: String,
+    /// Whether we're waiting for the user to confirm a tool call.
+    confirming: bool,
 }
 
 impl<B: Backend> TuiApp<B> {
@@ -157,6 +159,7 @@ impl<B: Backend> TuiApp<B> {
             is_streaming: false,
             is_thinking: false,
             thinking_text: String::new(),
+            confirming: false,
         })
     }
 
@@ -281,6 +284,14 @@ impl<B: Backend> TuiApp<B> {
         self.conversation.push(ConversationLine::Separator);
     }
 
+    /// Add a confirmation prompt to the conversation.
+    pub fn push_confirm_prompt(&mut self, name: &str, args_summary: &str) {
+        self.conversation.push(ConversationLine::ConfirmPrompt {
+            name: name.to_string(),
+            args_summary: args_summary.to_string(),
+        });
+    }
+
     /// Set the streaming state (shows/hides spinner).
     pub fn set_streaming(&mut self, streaming: bool) {
         self.state.streaming = streaming;
@@ -361,21 +372,6 @@ impl<B: Backend> TuiApp<B> {
                 } if modifiers.ctrl => {
                     self.state.sidebar_visible = !self.state.sidebar_visible;
                     return Action::ToggleSidebar;
-                }
-                // Tab: cycle focus forward
-                KeyEvent {
-                    key: Key::Tab,
-                    modifiers: Modifiers { shift: false, .. },
-                } => {
-                    self.cycle_focus(true);
-                    return Action::None;
-                }
-                // Shift+Tab: cycle focus backward
-                KeyEvent {
-                    key: Key::BackTab, ..
-                } => {
-                    self.cycle_focus(false);
-                    return Action::None;
                 }
                 // F1: focus conversation
                 KeyEvent { key: Key::F(1), .. } => {
@@ -554,6 +550,9 @@ impl<B: Backend> TuiApp<B> {
                     if cell.style.underline {
                         write!(self.terminal, "\x1b[4m")?;
                     }
+                    if cell.style.blink {
+                        write!(self.terminal, "\x1b[5m")?;
+                    }
                     // Write character
                     if cell.char != '\0' {
                         write!(self.terminal, "{}", cell.char)?;
@@ -661,6 +660,12 @@ impl<B: Backend> TuiApp<B> {
                 self.state.mode = mode;
                 self.sync_from_state();
             }
+            Action::CycleFocusForward => {
+                self.cycle_focus(true);
+            }
+            Action::CycleFocusBackward => {
+                self.cycle_focus(false);
+            }
             Action::ScrollUp => {
                 self.conversation.scroll_up(3);
             }
@@ -673,7 +678,37 @@ impl<B: Backend> TuiApp<B> {
             Action::PageDown => {
                 self.conversation.scroll_down(20);
             }
-            Action::ToggleMode | Action::None => {}
+            Action::ConfirmYes => {
+                self.confirming = false;
+                self.input_bar.set_confirming(false);
+                let _ = self
+                    .user_action_tx
+                    .send(super::TuiUserAction::ConfirmResponse {
+                        approved: true,
+                        auto_accept: false,
+                    });
+            }
+            Action::ConfirmNo => {
+                self.confirming = false;
+                self.input_bar.set_confirming(false);
+                let _ = self
+                    .user_action_tx
+                    .send(super::TuiUserAction::ConfirmResponse {
+                        approved: false,
+                        auto_accept: false,
+                    });
+            }
+            Action::ConfirmAll => {
+                self.confirming = false;
+                self.input_bar.set_confirming(false);
+                let _ = self
+                    .user_action_tx
+                    .send(super::TuiUserAction::ConfirmResponse {
+                        approved: true,
+                        auto_accept: true,
+                    });
+            }
+            Action::None => {}
         }
     }
 
@@ -709,6 +744,8 @@ impl<B: Backend> TuiApp<B> {
                 self.streaming_text.push_str(&text);
                 // Update the last assistant message or add a new one
                 self.update_streaming_assistant_message();
+                // Ensure we auto-scroll to follow the new content
+                self.conversation.scroll_to_bottom();
             }
             TuiAgentEvent::StreamingThinking(text) => {
                 self.thinking_text.push_str(&text);
@@ -723,6 +760,8 @@ impl<B: Backend> TuiApp<B> {
                     };
                     *t = preview;
                 }
+                // Ensure we auto-scroll to follow thinking content
+                self.conversation.scroll_to_bottom();
             }
             TuiAgentEvent::StreamingDone => {
                 // Finalize thinking if still active
@@ -792,15 +831,13 @@ impl<B: Backend> TuiApp<B> {
                 args_summary,
                 needs_approval: _,
             } => {
-                // For now, auto-approve in TUI mode. A future improvement
-                // could show an inline confirmation dialog.
-                let _ = self
-                    .user_action_tx
-                    .send(super::TuiUserAction::ConfirmResponse {
-                        approved: true,
-                        auto_accept: false,
-                    });
-                self.push_system_message(&format!("Auto-approved: {} {}", name, args_summary));
+                // Show a confirmation prompt in the conversation and switch
+                // the input bar to confirmation mode. The agent loop will
+                // block until we send a ConfirmResponse back.
+                self.push_confirm_prompt(&name, &args_summary);
+                self.confirming = true;
+                self.input_bar.set_confirming(true);
+                self.set_focus(Focus::InputBar);
             }
             TuiAgentEvent::Question { question, answers } => {
                 // Show the question in the conversation and auto-select the first answer.
@@ -932,6 +969,7 @@ pub fn spawn_stdin_reader() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>) {
 mod tests {
     use super::*;
     use crate::tui::backend::TestBackend;
+    use crate::tui::event::Modifiers;
     use crate::tui::terminal::Size;
 
     fn make_app() -> TuiApp<TestBackend> {
@@ -1094,11 +1132,14 @@ mod tests {
     #[test]
     fn test_app_handle_tab_focus() {
         let mut app = make_app();
+        // Tab on empty input returns CycleFocusForward from input bar
         let event = Event::Key(KeyEvent {
             key: Key::Tab,
             modifiers: Modifiers::new(),
         });
-        app.handle_event(&event);
+        let action = app.handle_event(&event);
+        // The action should cycle focus forward
+        app.handle_action(action);
         assert_eq!(app.focus, Focus::Conversation);
     }
 

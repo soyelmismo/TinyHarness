@@ -142,7 +142,7 @@ pub async fn run_tui_agent_loop(
     mut session: Session,
     interrupted: Arc<AtomicBool>,
     initial_prompt: Option<String>,
-    user_action_rx: mpsc::Receiver<TuiUserAction>,
+    mut user_action_rx: mpsc::Receiver<TuiUserAction>,
     agent_event_tx: mpsc::Sender<TuiAgentEvent>,
 ) -> Result<(), String> {
     let registry = build_registry();
@@ -186,6 +186,7 @@ pub async fn run_tui_agent_loop(
             &registry,
             &interrupted,
             &agent_event_tx,
+            &mut user_action_rx,
             &mut last_known_token_usage,
             context_size,
         )
@@ -246,6 +247,7 @@ pub async fn run_tui_agent_loop(
                     &registry,
                     &interrupted,
                     &agent_event_tx,
+                    &mut user_action_rx,
                     &mut last_known_token_usage,
                     context_size,
                 )
@@ -429,6 +431,7 @@ async fn process_user_message(
     _registry: &crate::commands::CommandRegistry,
     interrupted: &Arc<AtomicBool>,
     agent_event_tx: &mpsc::Sender<TuiAgentEvent>,
+    user_action_rx: &mut mpsc::Receiver<TuiUserAction>,
     last_known_token_usage: &mut Option<tinyharness_lib::provider::TokenUsage>,
     context_size: ContextWindowSize,
 ) {
@@ -593,6 +596,7 @@ async fn process_user_message(
                 provider,
                 interrupted,
                 agent_event_tx,
+                user_action_rx,
                 &mut auto_accept,
             )
             .await;
@@ -631,6 +635,7 @@ async fn handle_tui_tool_calls(
     provider: &Arc<Mutex<dyn Provider + Send + Sync>>,
     interrupted: &Arc<AtomicBool>,
     agent_event_tx: &mpsc::Sender<TuiAgentEvent>,
+    user_action_rx: &mut mpsc::Receiver<TuiUserAction>,
     auto_accept: &mut bool,
 ) -> bool {
     if tool_calls.is_empty() {
@@ -870,9 +875,44 @@ async fn handle_tui_tool_calls(
                 {
                     (true, true)
                 } else {
-                    // Still require confirmation for unsafe run commands
-                    // In TUI mode, auto-approve for now
-                    (true, true)
+                    // Unsafe run command — still require confirmation even in auto-accept mode
+                    // Ask the user via the TUI confirmation flow
+                    let args_summary = format_args_summary(&call.function.arguments);
+                    let _ = agent_event_tx.send(TuiAgentEvent::ConfirmTool {
+                        name: call.function.name.clone(),
+                        args_summary: args_summary.clone(),
+                        needs_approval: true,
+                    });
+                    // Wait for user response
+                    loop {
+                        match user_action_rx.recv() {
+                            Ok(TuiUserAction::ConfirmResponse {
+                                approved,
+                                auto_accept: resp_auto_accept,
+                            }) => {
+                                if resp_auto_accept {
+                                    *auto_accept = true;
+                                }
+                                break (approved, resp_auto_accept);
+                            }
+                            Ok(TuiUserAction::Interrupt) => {
+                                interrupted.store(true, Ordering::SeqCst);
+                                break (false, false);
+                            }
+                            Ok(TuiUserAction::Quit) => {
+                                let _ = agent_event_tx.send(TuiAgentEvent::Done);
+                                return false;
+                            }
+                            Ok(_) => {
+                                // Ignore other actions while waiting for confirmation
+                                continue;
+                            }
+                            Err(_) => {
+                                // Channel closed
+                                return false;
+                            }
+                        }
+                    }
                 }
             } else {
                 (true, true)
@@ -885,9 +925,43 @@ async fn handle_tui_tool_calls(
         {
             (true, true)
         } else {
-            // In TUI mode, auto-approve destructive tool calls for now
-            // A future improvement would show an inline confirmation dialog
-            (true, false)
+            // Needs confirmation — ask the user via the TUI confirmation flow
+            let args_summary = format_args_summary(&call.function.arguments);
+            let _ = agent_event_tx.send(TuiAgentEvent::ConfirmTool {
+                name: call.function.name.clone(),
+                args_summary: args_summary.clone(),
+                needs_approval: true,
+            });
+            // Wait for user response
+            loop {
+                match user_action_rx.recv() {
+                    Ok(TuiUserAction::ConfirmResponse {
+                        approved,
+                        auto_accept: resp_auto_accept,
+                    }) => {
+                        if resp_auto_accept {
+                            *auto_accept = true;
+                        }
+                        break (approved, resp_auto_accept);
+                    }
+                    Ok(TuiUserAction::Interrupt) => {
+                        interrupted.store(true, Ordering::SeqCst);
+                        break (false, false);
+                    }
+                    Ok(TuiUserAction::Quit) => {
+                        let _ = agent_event_tx.send(TuiAgentEvent::Done);
+                        return false;
+                    }
+                    Ok(_) => {
+                        // Ignore other actions while waiting for confirmation
+                        continue;
+                    }
+                    Err(_) => {
+                        // Channel closed
+                        return false;
+                    }
+                }
+            }
         };
 
         if !approved {

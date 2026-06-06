@@ -1,17 +1,23 @@
 // ── Input bar widget ──────────────────────────────────────────────────────────
 //
-// Multi-line input with history, cursor tracking, and mode/model label.
+// Multi-line input with history, cursor tracking, mode/model label,
+// and tab completion for slash commands.
 
 use crate::tui::cell::{Color, Style};
 use crate::tui::event::{Event, Key, KeyEvent};
 use crate::tui::layout::Rect;
 use crate::tui::screen::Screen;
 use crate::tui::widget::{Action, Widget, styles};
+use crate::ui::input::{COMMAND_NAMES, subcommand_completions};
 
 /// The input bar at the bottom of the screen.
 ///
 /// Displays a prompt with mode and model labels, and accepts
 /// multi-line text input. Enter submits, Shift+Enter inserts a newline.
+/// Tab completes slash commands when the input starts with `/`.
+///
+/// In confirmation mode, the input bar shows a `[y/n/a]?` prompt
+/// and only accepts y (approve), n (deny), or a (approve all) keys.
 pub struct InputBarWidget {
     /// Current input text.
     content: String,
@@ -31,6 +37,15 @@ pub struct InputBarWidget {
     model_name: String,
     /// Whether the input bar is focused.
     focused: bool,
+    /// Current tab-completion state: index into the list of matching completions.
+    /// `None` means we're not in tab-completion cycling mode.
+    tab_cycle_index: Option<usize>,
+    /// The prefix that was being completed when Tab cycling started.
+    tab_cycle_prefix: String,
+    /// Whether the last completion was a subcommand completion.
+    tab_cycle_subcommand: bool,
+    /// Whether the input bar is in confirmation mode (y/n/a).
+    confirming: bool,
 }
 
 impl InputBarWidget {
@@ -53,6 +68,10 @@ impl InputBarWidget {
             mode_color,
             model_name: model_name.to_string(),
             focused: true,
+            tab_cycle_index: None,
+            tab_cycle_prefix: String::new(),
+            tab_cycle_subcommand: false,
+            confirming: false,
         }
     }
 
@@ -106,6 +125,123 @@ impl InputBarWidget {
     fn line_count(&self) -> usize {
         self.content.lines().count().max(1)
     }
+
+    /// Check if the current input starts with a slash (for command detection).
+    pub fn is_command_input(&self) -> bool {
+        self.content.starts_with('/')
+    }
+
+    /// Enter or exit confirmation mode.
+    ///
+    /// In confirmation mode, the input bar shows a `[y/n/a]?` prompt
+    /// and only accepts y (approve), n (deny), or a (approve all) keys.
+    pub fn set_confirming(&mut self, confirming: bool) {
+        self.confirming = confirming;
+        if confirming {
+            self.content.clear();
+            self.cursor = 0;
+        }
+    }
+
+    /// Check if the input bar is in confirmation mode.
+    pub fn is_confirming(&self) -> bool {
+        self.confirming
+    }
+
+    /// Attempt tab completion for slash commands.
+    ///
+    /// If the input starts with `/`, cycle through matching command names
+    /// (or subcommand arguments). Returns `true` if a completion was applied,
+    /// `false` if no completions matched.
+    ///
+    /// Tab cycling works by remembering the original prefix the user typed
+    /// before the first Tab. Subsequent Tabs cycle through all commands
+    /// that start with that prefix.
+    fn tab_complete(&mut self) -> bool {
+        if !self.content.starts_with('/') {
+            return false;
+        }
+
+        // Determine if we're completing a subcommand or a top-level command
+        if let Some(space_pos) = self.content.find(' ') {
+            // Subcommand completion: "/command sub<tab>"
+            let cmd = &self.content[..space_pos].to_lowercase();
+            let current_arg = self.content[space_pos + 1..].trim_start().to_lowercase();
+
+            let subs = subcommand_completions(cmd);
+            if subs.is_empty() {
+                return false;
+            }
+
+            // On first Tab (or if the prefix changed), start a new cycle
+            if self.tab_cycle_index.is_none()
+                || self.tab_cycle_prefix != current_arg
+                || !self.tab_cycle_subcommand
+            {
+                self.tab_cycle_prefix = current_arg.clone();
+                self.tab_cycle_index = Some(0);
+                self.tab_cycle_subcommand = true;
+            }
+
+            let matches: Vec<&&str> = subs
+                .iter()
+                .filter(|s| s.starts_with(&self.tab_cycle_prefix))
+                .collect();
+
+            if matches.is_empty() {
+                self.tab_cycle_index = None;
+                return false;
+            }
+
+            let idx = self.tab_cycle_index.unwrap() % matches.len();
+            let completion = matches[idx];
+
+            // Replace the subcommand argument
+            self.content = format!("{} {}", cmd, completion);
+            self.cursor = self.content.len();
+            self.tab_cycle_index = Some(idx + 1);
+            true
+        } else {
+            // Top-level command completion: "/mod<tab>"
+            let current_input = self.content.to_lowercase();
+
+            // On first Tab (or if cycling context was for subcommands), start fresh
+            if self.tab_cycle_index.is_none() || self.tab_cycle_subcommand {
+                self.tab_cycle_prefix = current_input.clone();
+                self.tab_cycle_index = Some(0);
+                self.tab_cycle_subcommand = false;
+            } else {
+                // Continuing a cycle: the current content was set by the previous Tab,
+                // so the prefix we're matching against is still tab_cycle_prefix.
+                // The current content is a completed command name — don't update prefix.
+            }
+
+            let matches: Vec<&&str> = COMMAND_NAMES
+                .iter()
+                .filter(|name| name.starts_with(&self.tab_cycle_prefix))
+                .collect();
+
+            if matches.is_empty() {
+                self.tab_cycle_index = None;
+                return false;
+            }
+
+            let idx = self.tab_cycle_index.unwrap() % matches.len();
+            let completion = matches[idx];
+
+            self.content = completion.to_string();
+            self.cursor = self.content.len();
+            self.tab_cycle_index = Some(idx + 1);
+            true
+        }
+    }
+
+    /// Reset tab-completion cycling state (e.g., when a non-Tab key is pressed).
+    fn reset_tab_cycle(&mut self) {
+        self.tab_cycle_index = None;
+        self.tab_cycle_prefix.clear();
+        self.tab_cycle_subcommand = false;
+    }
 }
 
 impl Widget for InputBarWidget {
@@ -129,75 +265,107 @@ impl Widget for InputBarWidget {
 
         // Draw prompt and input on the next rows
         let input_row = row + 1;
-        let prompt = format!("[{}] ", self.mode_label);
-        let _model_suffix = format!(" {}{}", self.model_name, Color::Default.fg_escape());
 
-        // Draw mode label
-        let mut col = area.x;
-        screen.write_str(
-            input_row,
-            col,
-            &prompt,
-            self.mode_color,
-            styles::INPUT_BAR_BG,
-            Style::bold(),
-        );
-        col += prompt.len() as u16;
+        if self.confirming {
+            // In confirmation mode, show a yellow prompt asking for y/n/a
+            let confirm_prompt = "[y/n/a]? ";
+            let mut col = area.x;
+            screen.write_str(
+                input_row,
+                col,
+                confirm_prompt,
+                Color::YELLOW,
+                styles::INPUT_BAR_BG,
+                Style::bold(),
+            );
+            col += confirm_prompt.len() as u16;
 
-        // Draw input content (with wrapping if needed)
-        let available_width = area.width.saturating_sub(col - area.x);
-        let display_text = if self.content.len() > available_width as usize {
-            // Show the end of the text that fits, scrolled to cursor
-            let start = self.content.len().saturating_sub(available_width as usize);
-            &self.content[start..]
-        } else {
-            &self.content
-        };
-
-        screen.write_str(
-            input_row,
-            col,
-            display_text,
-            Color::WHITE,
-            styles::INPUT_BAR_BG,
-            Style::default(),
-        );
-
-        // Draw cursor (blinking is handled by terminal, we just position it)
-        if self.focused {
-            let cursor_col = col + self.cursor.min(display_text.len()) as u16;
-            if cursor_col < area.x + area.width {
-                // Underline the character under the cursor
-                if let Some(cell) = screen.get_mut(input_row, cursor_col) {
-                    cell.style.underline = true;
+            // Draw blinking cursor indicator
+            if self.focused && col < area.x + area.width {
+                if let Some(cell) = screen.get_mut(input_row, col) {
+                    cell.char = '█';
+                    cell.fg = Color::YELLOW;
+                    cell.style = Style::blink();
                 }
             }
-        }
 
-        // Fill the rest of the input line with background
-        let text_end = col + display_text.len() as u16;
-        if text_end < area.x + area.width {
-            // Background is already filled by write_str
-        }
+            // Fill the rest with background
+            for c in col + 1..area.x + area.width {
+                if let Some(cell) = screen.get_mut(input_row, c) {
+                    cell.bg = styles::INPUT_BAR_BG;
+                }
+            }
+        } else {
+            let prompt = format!("[{}] ", self.mode_label);
+            let _model_suffix = format!(" {}{}", self.model_name, Color::Default.fg_escape());
 
-        // For multi-line input, render additional lines
-        let lines: Vec<&str> = self.content.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            if i == 0 {
-                continue; // Already rendered the first line
-            }
-            let line_row = input_row + i as u16;
-            if line_row >= area.y + area.height {
-                break;
-            }
+            // Draw mode label
+            let mut col = area.x;
             screen.write_str(
-                line_row,
-                area.x,
-                line,
+                input_row,
+                col,
+                &prompt,
+                self.mode_color,
+                styles::INPUT_BAR_BG,
+                Style::bold(),
+            );
+            col += prompt.len() as u16;
+
+            // Draw input content (with wrapping if needed)
+            let available_width = area.width.saturating_sub(col - area.x);
+            let display_text = if self.content.len() > available_width as usize {
+                // Show the end of the text that fits, scrolled to cursor
+                let start = self.content.len().saturating_sub(available_width as usize);
+                &self.content[start..]
+            } else {
+                &self.content
+            };
+
+            screen.write_str(
+                input_row,
+                col,
+                display_text,
                 Color::WHITE,
                 styles::INPUT_BAR_BG,
                 Style::default(),
             );
+
+            // Draw cursor (blinking is handled by terminal, we just position it)
+            if self.focused {
+                let cursor_col = col + self.cursor.min(display_text.len()) as u16;
+                if cursor_col < area.x + area.width {
+                    // Underline the character under the cursor
+                    if let Some(cell) = screen.get_mut(input_row, cursor_col) {
+                        cell.style.underline = true;
+                    }
+                }
+            }
+
+            // Fill the rest of the input line with background
+            let text_end = col + display_text.len() as u16;
+            if text_end < area.x + area.width {
+                // Background is already filled by write_str
+            }
+
+            // For multi-line input, render additional lines
+            let lines: Vec<&str> = self.content.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if i == 0 {
+                    continue; // Already rendered the first line
+                }
+                let line_row = input_row + i as u16;
+                if line_row >= area.y + area.height {
+                    break;
+                }
+                screen.write_str(
+                    line_row,
+                    area.x,
+                    line,
+                    Color::WHITE,
+                    styles::INPUT_BAR_BG,
+                    Style::default(),
+                );
+            }
         }
     }
 
@@ -206,6 +374,55 @@ impl Widget for InputBarWidget {
             return Action::None;
         };
 
+        // In confirmation mode, only accept y/n/a responses
+        if self.confirming {
+            match key {
+                KeyEvent {
+                    key: Key::Char('y'),
+                    modifiers,
+                } if !modifiers.ctrl && !modifiers.alt => {
+                    self.confirming = false;
+                    Action::ConfirmYes
+                }
+                KeyEvent {
+                    key: Key::Char('n'),
+                    modifiers,
+                } if !modifiers.ctrl && !modifiers.alt => {
+                    self.confirming = false;
+                    Action::ConfirmNo
+                }
+                KeyEvent {
+                    key: Key::Char('a'),
+                    modifiers,
+                } if !modifiers.ctrl && !modifiers.alt => {
+                    self.confirming = false;
+                    Action::ConfirmAll
+                }
+                KeyEvent {
+                    key: Key::Escape, ..
+                } => {
+                    self.confirming = false;
+                    Action::ConfirmNo
+                }
+                _ => Action::None,
+            }
+        } else {
+            self.handle_normal_key(key)
+        }
+    }
+
+    fn focused(&self) -> bool {
+        self.focused
+    }
+
+    fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+}
+
+impl InputBarWidget {
+    /// Handle a key event in normal (non-confirmation) mode.
+    fn handle_normal_key(&mut self, key: &KeyEvent) -> Action {
         match key {
             KeyEvent {
                 key: Key::Enter,
@@ -215,10 +432,12 @@ impl Widget for InputBarWidget {
                     // Shift+Enter: insert newline
                     self.content.insert(self.cursor, '\n');
                     self.cursor += 1;
+                    self.reset_tab_cycle();
                     Action::None
                 } else {
                     // Enter: submit the message
                     let text = self.take_input();
+                    self.reset_tab_cycle();
                     if text.trim().is_empty() {
                         Action::None
                     } else {
@@ -238,6 +457,7 @@ impl Widget for InputBarWidget {
                         self.content.remove(self.cursor);
                     }
                 }
+                self.reset_tab_cycle();
                 Action::None
             }
             KeyEvent {
@@ -251,6 +471,7 @@ impl Widget for InputBarWidget {
                         self.content.replace_range(self.cursor..end, "");
                     }
                 }
+                self.reset_tab_cycle();
                 Action::None
             }
             KeyEvent { key: Key::Left, .. } => {
@@ -259,6 +480,7 @@ impl Widget for InputBarWidget {
                         self.cursor -= ch.len_utf8();
                     }
                 }
+                self.reset_tab_cycle();
                 Action::None
             }
             KeyEvent {
@@ -269,6 +491,7 @@ impl Widget for InputBarWidget {
                         self.cursor += ch.len_utf8();
                     }
                 }
+                self.reset_tab_cycle();
                 Action::None
             }
             KeyEvent { key: Key::Home, .. } => {
@@ -278,6 +501,7 @@ impl Widget for InputBarWidget {
                     .map(|p| p + 1)
                     .unwrap_or(0);
                 self.cursor = line_start;
+                self.reset_tab_cycle();
                 Action::None
             }
             KeyEvent { key: Key::End, .. } => {
@@ -287,6 +511,7 @@ impl Widget for InputBarWidget {
                     .map(|p| self.cursor + p)
                     .unwrap_or(self.content.len());
                 self.cursor = line_end;
+                self.reset_tab_cycle();
                 Action::None
             }
             KeyEvent {
@@ -303,6 +528,7 @@ impl Widget for InputBarWidget {
                         self.cursor = self.content.len();
                     }
                 }
+                self.reset_tab_cycle();
                 Action::None
             }
             KeyEvent {
@@ -320,7 +546,27 @@ impl Widget for InputBarWidget {
                     }
                     self.cursor = self.content.len();
                 }
+                self.reset_tab_cycle();
                 Action::None
+            }
+            KeyEvent {
+                key: Key::Tab,
+                modifiers,
+            } if !modifiers.shift => {
+                // Tab: command completion if input starts with '/', otherwise cycle focus
+                if self.is_command_input() {
+                    self.tab_complete();
+                    Action::None
+                } else {
+                    // Not a command — let the app cycle focus
+                    Action::CycleFocusForward
+                }
+            }
+            KeyEvent {
+                key: Key::BackTab, ..
+            } => {
+                // Shift+Tab: always cycle focus backward
+                Action::CycleFocusBackward
             }
             KeyEvent {
                 key: Key::Char(c),
@@ -336,6 +582,7 @@ impl Widget for InputBarWidget {
                 } else {
                     self.content.insert(self.cursor, *c);
                     self.cursor += c.len_utf8();
+                    self.reset_tab_cycle();
                     Action::None
                 }
             }
@@ -348,19 +595,12 @@ impl Widget for InputBarWidget {
                     // Clear input on Escape
                     self.content.clear();
                     self.cursor = 0;
+                    self.reset_tab_cycle();
                     Action::None
                 }
             }
             _ => Action::None,
         }
-    }
-
-    fn focused(&self) -> bool {
-        self.focused
-    }
-
-    fn set_focus(&mut self, focused: bool) {
-        self.focused = focused;
     }
 }
 
@@ -467,5 +707,241 @@ mod tests {
         let action = bar.handle_event(&event);
         assert!(matches!(action, Action::None));
         assert!(bar.content.is_empty());
+    }
+
+    #[test]
+    fn test_tab_complete_command() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.content = "/mod".to_string();
+        bar.cursor = 4;
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Tab,
+            modifiers: Modifiers::new(),
+        });
+        bar.handle_event(&event);
+        assert_eq!(bar.content, "/mode");
+        assert_eq!(bar.cursor, 5);
+    }
+
+    #[test]
+    fn test_tab_complete_cycle() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.content = "/co".to_string();
+        bar.cursor = 3;
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Tab,
+            modifiers: Modifiers::new(),
+        });
+
+        // First Tab — completes to first match
+        bar.handle_event(&event);
+        let first = bar.content.clone();
+        assert!(first.starts_with("/co"));
+
+        // Second Tab — cycles to next match
+        bar.handle_event(&event);
+        let second = bar.content.clone();
+        assert!(second.starts_with("/co"));
+        assert_ne!(first, second);
+
+        // Third Tab — cycles to next match
+        bar.handle_event(&event);
+        let third = bar.content.clone();
+        assert!(third.starts_with("/co"));
+        // Should cycle through /command, /compact, /context
+        assert_ne!(second, third);
+    }
+
+    #[test]
+    fn test_tab_complete_resets_on_typing() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.content = "/mod".to_string();
+        bar.cursor = 4;
+
+        let tab = Event::Key(KeyEvent {
+            key: Key::Tab,
+            modifiers: Modifiers::new(),
+        });
+        bar.handle_event(&tab);
+        assert_eq!(bar.content, "/mode");
+
+        // Type a character — should reset tab cycle state
+        let char_event = Event::Key(KeyEvent {
+            key: Key::Char(' '),
+            modifiers: Modifiers::new(),
+        });
+        bar.handle_event(&char_event);
+        assert_eq!(bar.content, "/mode ");
+
+        // Tab again — should start a new completion cycle for subcommands
+        bar.handle_event(&tab);
+        // "/mode " with subcommand completion for /mode
+        assert!(bar.content.starts_with("/mode "));
+    }
+
+    #[test]
+    fn test_tab_complete_subcommand() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.content = "/command a".to_string();
+        bar.cursor = 10;
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Tab,
+            modifiers: Modifiers::new(),
+        });
+        bar.handle_event(&event);
+        assert_eq!(bar.content, "/command add");
+    }
+
+    #[test]
+    fn test_tab_non_command_cycles_focus() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.content = "hello".to_string();
+        bar.cursor = 5;
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Tab,
+            modifiers: Modifiers::new(),
+        });
+        let action = bar.handle_event(&event);
+        assert!(matches!(action, Action::CycleFocusForward));
+        // Content should be unchanged
+        assert_eq!(bar.content, "hello");
+    }
+
+    #[test]
+    fn test_shift_tab_cycles_focus_backward() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.content = "hello".to_string();
+
+        let event = Event::Key(KeyEvent {
+            key: Key::BackTab,
+            modifiers: Modifiers::new(),
+        });
+        let action = bar.handle_event(&event);
+        assert!(matches!(action, Action::CycleFocusBackward));
+    }
+
+    #[test]
+    fn test_tab_complete_empty_prefix() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.content = "/".to_string();
+        bar.cursor = 1;
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Tab,
+            modifiers: Modifiers::new(),
+        });
+        bar.handle_event(&event);
+        // Should complete to the first command alphabetically
+        assert!(bar.content.starts_with('/'));
+        assert!(bar.content.len() > 1);
+    }
+
+    #[test]
+    fn test_is_command_input() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        assert!(!bar.is_command_input());
+        bar.content = "/help".to_string();
+        assert!(bar.is_command_input());
+        bar.content = "hello".to_string();
+        assert!(!bar.is_command_input());
+    }
+
+    #[test]
+    fn test_confirmation_mode_set() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        assert!(!bar.is_confirming());
+        bar.set_confirming(true);
+        assert!(bar.is_confirming());
+        assert!(bar.content.is_empty());
+        bar.set_confirming(false);
+        assert!(!bar.is_confirming());
+    }
+
+    #[test]
+    fn test_confirmation_y_approves() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.set_confirming(true);
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Char('y'),
+            modifiers: Modifiers::new(),
+        });
+        let action = bar.handle_event(&event);
+        assert!(matches!(action, Action::ConfirmYes));
+        assert!(!bar.is_confirming());
+    }
+
+    #[test]
+    fn test_confirmation_n_denies() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.set_confirming(true);
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Char('n'),
+            modifiers: Modifiers::new(),
+        });
+        let action = bar.handle_event(&event);
+        assert!(matches!(action, Action::ConfirmNo));
+        assert!(!bar.is_confirming());
+    }
+
+    #[test]
+    fn test_confirmation_a_approves_all() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.set_confirming(true);
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Char('a'),
+            modifiers: Modifiers::new(),
+        });
+        let action = bar.handle_event(&event);
+        assert!(matches!(action, Action::ConfirmAll));
+        assert!(!bar.is_confirming());
+    }
+
+    #[test]
+    fn test_confirmation_escape_denies() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.set_confirming(true);
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Escape,
+            modifiers: Modifiers::new(),
+        });
+        let action = bar.handle_event(&event);
+        assert!(matches!(action, Action::ConfirmNo));
+        assert!(!bar.is_confirming());
+    }
+
+    #[test]
+    fn test_confirmation_ignores_other_keys() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.set_confirming(true);
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Char('x'),
+            modifiers: Modifiers::new(),
+        });
+        let action = bar.handle_event(&event);
+        assert!(matches!(action, Action::None));
+        assert!(bar.is_confirming()); // Still in confirmation mode
+    }
+
+    #[test]
+    fn test_confirmation_ctrl_y_ignored() {
+        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        bar.set_confirming(true);
+
+        let event = Event::Key(KeyEvent {
+            key: Key::Char('y'),
+            modifiers: Modifiers::ctrl(),
+        });
+        let action = bar.handle_event(&event);
+        assert!(matches!(action, Action::None));
+        assert!(bar.is_confirming()); // Ctrl+y should not confirm
     }
 }

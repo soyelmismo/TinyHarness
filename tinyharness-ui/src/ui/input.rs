@@ -10,7 +10,7 @@ use crate::style::*;
 
 /// All known command names (primary + aliases), used for completion and hints.
 /// This must be kept in sync with the command registry in `commands/mod.rs`.
-const COMMAND_NAMES: &[&str] = &[
+pub const COMMAND_NAMES: &[&str] = &[
     "/add",
     "/agent",
     "/apikey",
@@ -49,7 +49,7 @@ const COMMAND_NAMES: &[&str] = &[
 ];
 
 /// Subcommand completions for commands that take arguments.
-fn subcommand_completions(cmd: &str) -> Vec<&'static str> {
+pub fn subcommand_completions(cmd: &str) -> Vec<&'static str> {
     match cmd {
         "/command" => vec![
             "add",
