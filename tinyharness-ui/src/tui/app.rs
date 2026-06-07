@@ -31,6 +31,8 @@ pub enum Focus {
     Conversation,
     ToolOutput,
     Sidebar,
+    /// Interactive file browser in the sidebar structure section.
+    Structure,
 }
 
 // ── Application state ────────────────────────────────────────────────────────
@@ -118,6 +120,8 @@ pub struct TuiApp<B: Backend> {
     thinking_text: String,
     /// Whether we're waiting for the user to confirm a tool call.
     confirming: bool,
+    /// Stored answers for the current question (to resolve number selections).
+    pending_question_answers: Vec<String>,
 }
 
 impl<B: Backend> TuiApp<B> {
@@ -160,6 +164,7 @@ impl<B: Backend> TuiApp<B> {
             is_thinking: false,
             thinking_text: String::new(),
             confirming: false,
+            pending_question_answers: Vec::new(),
         })
     }
 
@@ -373,19 +378,14 @@ impl<B: Backend> TuiApp<B> {
                     self.state.sidebar_visible = !self.state.sidebar_visible;
                     return Action::ToggleSidebar;
                 }
-                // F1: focus conversation
-                KeyEvent { key: Key::F(1), .. } => {
-                    self.set_focus(Focus::Conversation);
-                    return Action::None;
-                }
-                // F2: focus tool output (not yet used in main layout)
-                KeyEvent { key: Key::F(2), .. } => {
-                    self.set_focus(Focus::ToolOutput);
-                    return Action::None;
-                }
-                // F3: focus sidebar
-                KeyEvent { key: Key::F(3), .. } => {
-                    self.set_focus(Focus::Sidebar);
+                // Ctrl+P: focus structure (interactive file browser)
+                KeyEvent {
+                    key: Key::Char('p'),
+                    modifiers,
+                } if modifiers.ctrl => {
+                    if self.state.sidebar_visible {
+                        self.set_focus(Focus::Structure);
+                    }
                     return Action::None;
                 }
                 _ => {}
@@ -403,7 +403,7 @@ impl<B: Backend> TuiApp<B> {
         // Mouse scroll and PageUp/PageDown/Home/End go to the focused scrollable widget
         if let Event::Mouse(MouseEvent::ScrollUp { .. }) = event {
             match self.focus {
-                Focus::Sidebar => {
+                Focus::Sidebar | Focus::Structure => {
                     self.sidebar.scroll_up(3);
                 }
                 _ => {
@@ -414,7 +414,7 @@ impl<B: Backend> TuiApp<B> {
         }
         if let Event::Mouse(MouseEvent::ScrollDown { .. }) = event {
             match self.focus {
-                Focus::Sidebar => {
+                Focus::Sidebar | Focus::Structure => {
                     self.sidebar.scroll_down(3);
                 }
                 _ => {
@@ -431,7 +431,7 @@ impl<B: Backend> TuiApp<B> {
                     key: Key::PageUp, ..
                 } => {
                     match self.focus {
-                        Focus::Sidebar => self.sidebar.scroll_up(10),
+                        Focus::Sidebar | Focus::Structure => self.sidebar.scroll_up(10),
                         _ => self.conversation.scroll_up(20),
                     }
                     return Action::None;
@@ -440,14 +440,14 @@ impl<B: Backend> TuiApp<B> {
                     key: Key::PageDown, ..
                 } => {
                     match self.focus {
-                        Focus::Sidebar => self.sidebar.scroll_down(10),
+                        Focus::Sidebar | Focus::Structure => self.sidebar.scroll_down(10),
                         _ => self.conversation.scroll_down(20),
                     }
                     return Action::None;
                 }
                 KeyEvent { key: Key::Home, .. } => {
                     match self.focus {
-                        Focus::Sidebar => self.sidebar.scroll_home(),
+                        Focus::Sidebar | Focus::Structure => self.sidebar.scroll_home(),
                         _ => self.conversation.scroll_home(),
                     }
                     return Action::None;
@@ -489,6 +489,23 @@ impl<B: Backend> TuiApp<B> {
             Focus::Conversation => self.conversation.handle_event(event),
             Focus::ToolOutput => self.tool_output.handle_event(event),
             Focus::Sidebar => self.sidebar.handle_event(event),
+            Focus::Structure => {
+                // Tab/BackTab in structure mode exits it and cycles focus
+                if let Event::Key(KeyEvent { key: Key::Tab, .. }) = event {
+                    self.sidebar.exit_structure_mode();
+                    self.cycle_focus(true);
+                    return Action::None;
+                }
+                if let Event::Key(KeyEvent {
+                    key: Key::BackTab, ..
+                }) = event
+                {
+                    self.sidebar.exit_structure_mode();
+                    self.cycle_focus(false);
+                    return Action::None;
+                }
+                self.sidebar.handle_event(event)
+            }
         }
     }
 
@@ -508,6 +525,24 @@ impl<B: Backend> TuiApp<B> {
     fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
         self.input_bar.set_focus(focus == Focus::InputBar);
+        // Update the status bar focus indicator
+        let label = match focus {
+            Focus::InputBar => "input",
+            Focus::Conversation => "chat",
+            Focus::ToolOutput => "tools",
+            Focus::Sidebar => "sidebar",
+            Focus::Structure => "files",
+        };
+        self.status_bar.set_focus_label(label);
+        // When entering structure focus, ensure sidebar is visible and refresh directory
+        if focus == Focus::Structure {
+            self.sidebar.visible = true;
+            self.state.sidebar_visible = true;
+            self.sidebar.enter_structure_mode();
+        }
+        if self.focus != Focus::Structure {
+            self.sidebar.exit_structure_mode();
+        }
     }
 
     // ── Rendering ────────────────────────────────────────────────────────
@@ -529,13 +564,14 @@ impl<B: Backend> TuiApp<B> {
 
         // Render spinner if streaming
         if self.state.streaming {
-            // Put spinner in the bottom-right of the conversation area
-            let spinner_area = Rect::new(
-                conv_area.x + conv_area.width.saturating_sub(8),
-                conv_area.y + conv_area.height.saturating_sub(1),
-                8,
-                1,
-            );
+            // Put spinner in the bottom-right of the conversation area.
+            // Clip to conv_area bounds so it doesn't overflow into the sidebar.
+            let spinner_width = 12u16; // frame(1) + space(1) + label up to ~10 chars
+            let spinner_x = conv_area.x + conv_area.width.saturating_sub(spinner_width);
+            let spinner_y = conv_area.y + conv_area.height.saturating_sub(1);
+            // Ensure we don't extend past the conversation area
+            let actual_width = spinner_width.min(conv_area.right().saturating_sub(spinner_x));
+            let spinner_area = Rect::new(spinner_x, spinner_y, actual_width, 1);
             self.spinner.render(spinner_area, &mut self.screen);
         }
     }
@@ -735,6 +771,27 @@ impl<B: Backend> TuiApp<B> {
                         auto_accept: true,
                     });
             }
+            Action::AnswerQuestion(input) => {
+                self.input_bar.set_questioning(false, 0);
+                // Resolve the answer: if it's a number, map to the predefined answers
+                let answer = if let Ok(num) = input.parse::<usize>() {
+                    if num >= 1 && num <= self.pending_question_answers.len() {
+                        self.pending_question_answers[num - 1].clone()
+                    } else {
+                        input
+                    }
+                } else {
+                    input
+                };
+                self.pending_question_answers.clear();
+                let _ = self
+                    .user_action_tx
+                    .send(super::TuiUserAction::QuestionAnswer(answer));
+            }
+            Action::ExitStructureMode => {
+                // Exit structure mode — return focus to input bar
+                self.set_focus(Focus::InputBar);
+            }
             Action::None => {}
         }
     }
@@ -745,15 +802,15 @@ impl<B: Backend> TuiApp<B> {
             TuiAgentEvent::StreamingStarted => {
                 self.is_streaming = true;
                 self.streaming_text.clear();
-                self.is_thinking = true;
+                self.is_thinking = false;
                 self.thinking_text.clear();
                 self.spinner.set_label("Thinking");
                 self.spinner.start();
                 self.set_streaming(true);
-                // Push a placeholder thinking line that will be updated
-                self.conversation.push(ConversationLine::Thinking {
-                    text: String::new(),
-                });
+                // Don't push a Thinking placeholder here — push it lazily
+                // when the first StreamingThinking event arrives. This avoids
+                // showing an empty thinking indicator when the model produces
+                // no thinking content (e.g., non-Ollama models or thinking disabled).
             }
             TuiAgentEvent::StreamingText(text) => {
                 // If we were thinking, finalize the thinking block first
@@ -775,13 +832,24 @@ impl<B: Backend> TuiApp<B> {
                 self.conversation.scroll_to_bottom();
             }
             TuiAgentEvent::StreamingThinking(text) => {
+                // If this is the first thinking chunk, push a blank line for
+                // visual separation from the previous message, then push a
+                // Thinking line lazily. This mirrors the CLI behavior of writing
+                // a newline before the [thinking] header.
+                if !self.is_thinking {
+                    self.is_thinking = true;
+                    self.conversation.push(ConversationLine::Separator);
+                    self.conversation.push(ConversationLine::Thinking {
+                        text: String::new(),
+                    });
+                }
                 self.thinking_text.push_str(&text);
-                self.is_thinking = true;
                 // Update the thinking indicator in the conversation
                 if let Some(ConversationLine::Thinking { text: t }) = self.conversation.last_mut() {
                     // Show a brief preview of thinking content
                     let preview = if self.thinking_text.len() > 80 {
-                        format!("{}…", &self.thinking_text[..78])
+                        use crate::tui::widget::truncate_str;
+                        format!("{}…", truncate_str(&self.thinking_text, 78))
                     } else {
                         self.thinking_text.clone()
                     };
@@ -867,21 +935,18 @@ impl<B: Backend> TuiApp<B> {
                 self.set_focus(Focus::InputBar);
             }
             TuiAgentEvent::Question { question, answers } => {
-                // Show the question in the conversation and auto-select the first answer.
-                // A future improvement could show an inline selection UI.
-                let options: Vec<String> = answers
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| format!("{}. {}", i + 1, a))
-                    .collect();
-                let display = format!("❓ {} [{}]", question, options.join(", "));
-                self.push_system_message(&display);
-                // Auto-select first answer
-                if let Some(first) = answers.first() {
-                    let _ = self
-                        .user_action_tx
-                        .send(super::TuiUserAction::QuestionAnswer(first.clone()));
+                // Show the question in the conversation and enter question mode.
+                // The user can type a number or custom text, then press Enter.
+                let mut display = format!("❓ {}", question);
+                for (i, a) in answers.iter().enumerate() {
+                    display.push_str(&format!("\n    {}. {}", i + 1, a));
                 }
+                self.push_system_message(&display);
+                // Enter question mode in the input bar
+                self.input_bar.set_questioning(true, answers.len());
+                self.set_focus(Focus::InputBar);
+                // Store the answers so we can resolve number selections
+                self.pending_question_answers = answers;
             }
             TuiAgentEvent::Done => {
                 // Finalize thinking if still active

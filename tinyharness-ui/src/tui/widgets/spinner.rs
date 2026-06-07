@@ -61,29 +61,45 @@ impl Widget for SpinnerWidget {
 
         let row = area.y;
         let col = area.x;
+        let max_col = area.x + area.width; // exclusive bound — clip here
 
         if let Some(frame) = SPINNER_FRAMES.get(self.frame) {
             // Draw spinner character
-            screen.write_str(
-                row,
-                col,
-                frame,
-                Color::ORANGE,
-                Color::Default,
-                Style::default(),
-            );
+            if col < max_col {
+                screen.write_str(
+                    row,
+                    col,
+                    frame,
+                    Color::ORANGE,
+                    Color::Default,
+                    Style::default(),
+                );
+            }
 
-            // Draw label
+            // Draw label (clipped to area width)
             let label_col = col + 2;
-            let label = format!("{}…", self.label);
-            screen.write_str(
-                row,
-                label_col,
-                &label,
-                Color::Ansi(8),
-                Color::Default,
-                Style::dim(),
-            );
+            if label_col < max_col {
+                let available = (max_col - label_col) as usize;
+                let label = format!("{}…", self.label);
+                let clipped = if label.len() > available {
+                    // Truncate to fit within the area, preserving char boundaries
+                    let mut end = available;
+                    while end > 0 && !label.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    &label[..end]
+                } else {
+                    label.as_str()
+                };
+                screen.write_str(
+                    row,
+                    label_col,
+                    clipped,
+                    Color::Ansi(8),
+                    Color::Default,
+                    Style::dim(),
+                );
+            }
         }
     }
 }

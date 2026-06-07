@@ -26,6 +26,8 @@ pub struct StatusBarWidget {
     pub pinned_file_count: usize,
     pub session_name: String,
     pub is_streaming: bool,
+    /// Label for the currently focused widget (e.g., "input", "chat", "sidebar", "files").
+    pub focus_label: String,
 }
 
 impl StatusBarWidget {
@@ -47,6 +49,7 @@ impl StatusBarWidget {
             pinned_file_count: 0,
             session_name: String::from("unnamed"),
             is_streaming: false,
+            focus_label: String::from("input"),
         }
     }
 
@@ -81,6 +84,11 @@ impl StatusBarWidget {
     /// Set whether the assistant is currently streaming.
     pub fn set_streaming(&mut self, streaming: bool) {
         self.is_streaming = streaming;
+    }
+
+    /// Set the focus indicator label (e.g., "input", "chat", "files").
+    pub fn set_focus_label(&mut self, label: &str) {
+        self.focus_label = label.to_string();
     }
 
     /// Format token count for display.
@@ -246,9 +254,25 @@ impl Widget for StatusBarWidget {
             col += file_text.len() as u16;
         }
 
-        // Session name (right-aligned)
+        // Focus indicator (right of left-section, before session name)
+        let focus_text = format!(" ▸ {} ", self.focus_label);
+        let focus_color = Color::Ansi(178); // warm amber to stand out
+        // Place it just before the session name if there's room
         let session_text = format!(" {} ", self.session_name);
         let session_start = area.x + area.width.saturating_sub(session_text.len() as u16);
+        let focus_start = session_start.saturating_sub(focus_text.len() as u16);
+        if focus_start > col {
+            screen.write_str(
+                row,
+                focus_start,
+                &focus_text,
+                focus_color,
+                styles::STATUS_BAR_BG,
+                Style::bold(),
+            );
+        }
+
+        // Session name (right-aligned)
         if session_start > col {
             screen.write_str(
                 row,

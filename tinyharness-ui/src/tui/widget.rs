@@ -44,6 +44,10 @@ pub enum Action {
     ConfirmNo,
     /// User approved all future tool confirmations (pressed 'a').
     ConfirmAll,
+    /// Exit structure/file browser mode (Escape at root directory).
+    ExitStructureMode,
+    /// User answered a question with their input text.
+    AnswerQuestion(String),
     /// No action — the event was handled internally.
     None,
 }
@@ -126,4 +130,52 @@ pub mod styles {
     pub const BOX_TOP_TEE: char = '┬';
     pub const BOX_BOTTOM_TEE: char = '┴';
     pub const BOX_CROSS: char = '┼';
+}
+
+/// Safely truncate a string to at most `max_len` bytes, respecting UTF-8
+/// char boundaries. Returns a string slice that fits within `max_len` bytes.
+///
+/// Use this instead of `&s[..n]` which can panic if `n` lands inside a
+/// multi-byte UTF-8 character (common with emoji, CJK, accented letters).
+pub fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        return s;
+    }
+    // Find the largest char boundary <= max_len
+    let mut boundary = max_len;
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &s[..boundary]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_str_ascii() {
+        assert_eq!(truncate_str("hello", 3), "hel");
+        assert_eq!(truncate_str("hello", 10), "hello");
+        assert_eq!(truncate_str("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_str_multibyte() {
+        // 🦀 is 4 bytes
+        assert_eq!(truncate_str("🦀hello", 5), "🦀h"); // 🦀=4 bytes, +h=5
+        assert_eq!(truncate_str("🦀hello", 3), ""); // 🦀=4 bytes, boundary=0
+        // ⚙ is 3 bytes — truncating at byte 4 should include it
+        let s = "⚙hello";
+        assert_eq!(truncate_str(s, 4), "⚙h"); // ⚙=3 bytes + h=1 = 4
+    }
+
+    #[test]
+    fn test_truncate_str_no_panic() {
+        // Should never panic even with tricky byte boundaries
+        let s = "naïve café 🦀";
+        for i in 0..=s.len() + 5 {
+            let _ = truncate_str(s, i);
+        }
+    }
 }

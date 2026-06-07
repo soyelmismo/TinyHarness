@@ -4,10 +4,10 @@
 // color-coded messages, tool call blocks, and thinking chains.
 
 use crate::tui::cell::{Cell, Color, Style};
-use crate::tui::event::Event;
+use crate::tui::event::{Event, Key, KeyEvent};
 use crate::tui::layout::Rect;
 use crate::tui::screen::Screen;
-use crate::tui::widget::{Action, Widget, styles};
+use crate::tui::widget::{Action, Widget, styles, truncate_str};
 
 /// A single line in the conversation display.
 #[derive(Clone, Debug)]
@@ -101,7 +101,20 @@ impl ConversationWidget {
                 let joined = visible_lines.join("\n");
                 return self.line_height_for_text(&joined, 4, area_width).max(1); // At least 1 row even for empty content
             }
-            ConversationLine::ToolCall { .. } => return 1,
+            ConversationLine::ToolCall { name, args_summary } => {
+                let header = format!("  ── {}", name);
+                let header_len = header.len();
+                if args_summary.is_empty() {
+                    return 1;
+                }
+                // Calculate wrapping for args_summary starting after the header
+                let total_text = if args_summary.is_empty() {
+                    String::new()
+                } else {
+                    args_summary.clone()
+                };
+                return self.line_height_for_text_with_offset(&total_text, header_len, area_width);
+            }
             ConversationLine::Separator => return 1,
             ConversationLine::ConfirmPrompt { .. } => return 1,
         };
@@ -133,6 +146,37 @@ impl ConversationWidget {
         rows
     }
 
+    /// Helper: calculate visual row count for text where the first line starts
+    /// at `first_line_offset` (header length) and wrapped lines indent to the
+    /// same offset. This is used for tool call args that wrap.
+    fn line_height_for_text_with_offset(
+        &self,
+        text: &str,
+        first_line_offset: usize,
+        area_width: u16,
+    ) -> usize {
+        if area_width == 0 || text.is_empty() {
+            return 1;
+        }
+
+        let wrap_col = area_width as usize;
+        let mut rows = 1usize;
+        let mut col = first_line_offset;
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                rows += 1;
+                col = first_line_offset;
+            } else if col >= wrap_col {
+                rows += 1;
+                col = first_line_offset + 1;
+            } else {
+                col += 1;
+            }
+        }
+        rows
+    }
+
     /// Calculate the total visual height of all conversation lines.
     fn total_visual_height(&self, width: u16) -> usize {
         self.lines.iter().map(|l| self.line_height(l, width)).sum()
@@ -140,7 +184,8 @@ impl ConversationWidget {
 
     /// Scroll to the bottom of the conversation.
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = usize::MAX;
+        // Use a sentinel large value that will be clamped during render.
+        // We track whether auto_scroll is active separately.
         self.auto_scroll = true;
     }
 
@@ -255,8 +300,8 @@ impl ConversationWidget {
                 }
             }
             ConversationLine::ToolCall { name, args_summary } => {
+                let header = format!("  ── {}", name);
                 if skip_top == 0 && start_row <= max_row {
-                    let header = format!("  ── {} ", name);
                     screen.write_str(
                         start_row,
                         area.x,
@@ -266,23 +311,34 @@ impl ConversationWidget {
                         Style::default(),
                     );
                     if !args_summary.is_empty() {
-                        let available_width = (area.width as usize).saturating_sub(header.len());
-                        let args_display = if args_summary.len() > available_width.saturating_sub(3)
-                        {
-                            let end = available_width.saturating_sub(3).min(args_summary.len());
-                            format!("{}...", &args_summary[..end])
-                        } else {
-                            args_summary.clone()
-                        };
-                        screen.write_str(
+                        let args_indent = area.x + header.len() as u16;
+                        screen.write_str_wrapped_clipped(
                             start_row,
-                            area.x + header.len() as u16,
-                            &args_display,
+                            args_indent,
+                            args_summary,
                             Color::Ansi(96),
                             Color::Default,
                             Style::dim(),
+                            args_indent,
+                            effective_max_row,
+                            wrap_col,
                         );
                     }
+                } else if skip_top > 0 && !args_summary.is_empty() {
+                    let header = format!("  ── {}", name);
+                    let args_indent = area.x + header.len() as u16;
+                    screen.write_str_wrapped_skip_clipped(
+                        start_row,
+                        args_indent,
+                        args_summary,
+                        Color::Ansi(96),
+                        Color::Default,
+                        Style::dim(),
+                        args_indent,
+                        effective_max_row,
+                        wrap_col,
+                        skip_top,
+                    );
                 }
             }
             ConversationLine::ToolResult {
@@ -317,7 +373,7 @@ impl ConversationWidget {
                         format!(
                             "{}{}…",
                             prefix,
-                            &content_line[..max_content_width.saturating_sub(1)]
+                            truncate_str(content_line, max_content_width.saturating_sub(1))
                         )
                     } else {
                         format!("{}{}", prefix, content_line)
@@ -393,6 +449,7 @@ impl ConversationWidget {
             }
             ConversationLine::Thinking { text } => {
                 let prefix = "  [thinking] ";
+                let content_indent = area.x + prefix.len() as u16;
                 if skip_top == 0 && start_row <= max_row {
                     screen.write_str(
                         start_row,
@@ -409,12 +466,12 @@ impl ConversationWidget {
                     };
                     screen.write_str_wrapped_clipped(
                         start_row,
-                        area.x + prefix.len() as u16,
+                        content_indent,
                         &display_text,
                         styles::THINKING_FG,
                         Color::Default,
                         Style::dim(),
-                        area.x,
+                        content_indent,
                         effective_max_row,
                         wrap_col,
                     );
@@ -426,12 +483,12 @@ impl ConversationWidget {
                     };
                     screen.write_str_wrapped_skip_clipped(
                         start_row,
-                        area.x + prefix.len() as u16,
+                        content_indent,
                         &display_text,
                         styles::THINKING_FG,
                         Color::Default,
                         Style::dim(),
-                        area.x,
+                        content_indent,
                         effective_max_row,
                         wrap_col,
                         skip_top,
@@ -528,10 +585,10 @@ impl Widget for ConversationWidget {
         let total_height = self.total_visual_height(content_width);
 
         let max_scroll = total_height.saturating_sub(visible_rows);
-        if self.scroll_offset > max_scroll {
+        if self.auto_scroll {
             self.scroll_offset = max_scroll;
         }
-        if self.auto_scroll {
+        if self.scroll_offset > max_scroll {
             self.scroll_offset = max_scroll;
         }
 
@@ -577,6 +634,22 @@ impl Widget for ConversationWidget {
     }
 
     fn handle_event(&mut self, event: &Event) -> Action {
+        if let Event::Key(key) = event {
+            match key {
+                KeyEvent {
+                    key: Key::Tab,
+                    modifiers,
+                } if !modifiers.shift && !modifiers.alt && !modifiers.ctrl => {
+                    return Action::CycleFocusForward;
+                }
+                KeyEvent {
+                    key: Key::BackTab, ..
+                } => {
+                    return Action::CycleFocusBackward;
+                }
+                _ => {}
+            }
+        }
         let _ = event;
         Action::None
     }

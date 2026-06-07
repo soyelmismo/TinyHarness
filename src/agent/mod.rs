@@ -492,7 +492,7 @@ pub async fn run_agent_loop(
 
                                     // Show [thinking] header once, before the first delta
                                     if !thinking_header_shown {
-                                        write!(stdout, "{DIM}{THINK_COLOR}[thinking] ")?;
+                                        write!(stdout, "\n{DIM}{THINK_COLOR}[thinking] ")?;
                                         thinking_header_shown = true;
                                     }
 

@@ -7,7 +7,7 @@ use crate::tui::cell::{Cell, Color, Style};
 use crate::tui::event::{Event, Key, KeyEvent, Modifiers, MouseEvent};
 use crate::tui::layout::Rect;
 use crate::tui::screen::Screen;
-use crate::tui::widget::{Action, Widget};
+use crate::tui::widget::{Action, Widget, truncate_str};
 
 /// Status of a tool call.
 #[derive(Clone, Debug, PartialEq)]
@@ -140,7 +140,7 @@ impl ToolOutputWidget {
             if available > 10 {
                 let first_line = result.content.lines().next().unwrap_or("");
                 let preview = if first_line.len() > available.saturating_sub(3) {
-                    format!("{}…", &first_line[..available.saturating_sub(3)])
+                    format!("{}…", truncate_str(first_line, available.saturating_sub(3)))
                 } else {
                     first_line.to_string()
                 };
@@ -247,7 +247,7 @@ impl ToolOutputWidget {
 
             let available = (width as usize).saturating_sub(4);
             let display = if line.len() > available {
-                format!("{}…", &line[..available.saturating_sub(1)])
+                format!("{}…", truncate_str(line, available.saturating_sub(1)))
             } else {
                 line.to_string()
             };

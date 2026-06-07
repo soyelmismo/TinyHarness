@@ -110,10 +110,9 @@ async fn dispatch_command_to_tui(
     let output_bytes = capture.take_output();
     let output_text = String::from_utf8_lossy(&output_bytes);
     let stripped = strip_ansi_sgr(&output_text);
-    let trimmed = stripped.trim();
 
-    if !trimmed.is_empty() {
-        let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(trimmed.to_string()));
+    if !stripped.is_empty() {
+        let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(stripped.to_string()));
     }
 
     result
@@ -714,8 +713,37 @@ async fn handle_tui_tool_calls(
                         }
                     }
                     SignalEvent::Question { question, answers } => {
-                        // In TUI mode, auto-select the first answer
-                        let answer = answers.first().cloned().unwrap_or_default();
+                        // Send the question to the TUI for user interaction
+                        let _ = agent_event_tx.send(TuiAgentEvent::Question {
+                            question: question.clone(),
+                            answers: answers.clone(),
+                        });
+
+                        // Wait for the user's answer
+                        let answer = loop {
+                            match user_action_rx.recv() {
+                                Ok(TuiUserAction::QuestionAnswer(ans)) => {
+                                    break ans;
+                                }
+                                Ok(TuiUserAction::Interrupt) => {
+                                    interrupted.store(true, Ordering::SeqCst);
+                                    break "Skipped (interrupted)".to_string();
+                                }
+                                Ok(TuiUserAction::Quit) => {
+                                    let _ = agent_event_tx.send(TuiAgentEvent::Done);
+                                    return false;
+                                }
+                                Ok(_) => {
+                                    // Ignore other actions while waiting for answer
+                                    continue;
+                                }
+                                Err(_) => {
+                                    // Channel closed
+                                    break "Skipped (channel closed)".to_string();
+                                }
+                            }
+                        };
+
                         messages.push(Message {
                             role: Role::Tool,
                             content: format!(

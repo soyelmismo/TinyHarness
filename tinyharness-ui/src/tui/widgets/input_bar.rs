@@ -46,6 +46,10 @@ pub struct InputBarWidget {
     tab_cycle_subcommand: bool,
     /// Whether the input bar is in confirmation mode (y/n/a).
     confirming: bool,
+    /// Whether the input bar is in question mode (user must answer a question).
+    questioning: bool,
+    /// The number of predefined answers for the current question.
+    question_answer_count: usize,
 }
 
 impl InputBarWidget {
@@ -72,6 +76,8 @@ impl InputBarWidget {
             tab_cycle_prefix: String::new(),
             tab_cycle_subcommand: false,
             confirming: false,
+            questioning: false,
+            question_answer_count: 0,
         }
     }
 
@@ -146,6 +152,24 @@ impl InputBarWidget {
     /// Check if the input bar is in confirmation mode.
     pub fn is_confirming(&self) -> bool {
         self.confirming
+    }
+
+    /// Enter or exit question mode.
+    ///
+    /// In question mode, the input bar shows a prompt for the user to
+    /// type a number (1-N) or custom text, then press Enter.
+    pub fn set_questioning(&mut self, questioning: bool, answer_count: usize) {
+        self.questioning = questioning;
+        self.question_answer_count = answer_count;
+        if questioning {
+            self.content.clear();
+            self.cursor = 0;
+        }
+    }
+
+    /// Check if the input bar is in question mode.
+    pub fn is_questioning(&self) -> bool {
+        self.questioning
     }
 
     /// Attempt tab completion for slash commands.
@@ -295,6 +319,47 @@ impl Widget for InputBarWidget {
                     cell.bg = styles::INPUT_BAR_BG;
                 }
             }
+        } else if self.questioning {
+            // In question mode, show a cyan prompt asking for answer
+            let question_prompt = format!("[1-{} or type]: ", self.question_answer_count);
+            let mut col = area.x;
+            screen.write_str(
+                input_row,
+                col,
+                &question_prompt,
+                Color::CYAN,
+                styles::INPUT_BAR_BG,
+                Style::bold(),
+            );
+            col += question_prompt.len() as u16;
+
+            // Draw input content
+            let available_width = area.width.saturating_sub(col - area.x);
+            let display_text = if self.content.len() > available_width as usize {
+                let start = self.content.len().saturating_sub(available_width as usize);
+                &self.content[start..]
+            } else {
+                &self.content
+            };
+
+            screen.write_str(
+                input_row,
+                col,
+                display_text,
+                Color::WHITE,
+                styles::INPUT_BAR_BG,
+                Style::default(),
+            );
+
+            // Draw cursor
+            if self.focused {
+                let cursor_col = col + self.cursor.min(display_text.len()) as u16;
+                if cursor_col < area.x + area.width {
+                    if let Some(cell) = screen.get_mut(input_row, cursor_col) {
+                        cell.style.underline = true;
+                    }
+                }
+            }
         } else {
             let prompt = format!("[{}] ", self.mode_label);
             let _model_suffix = format!(" {}{}", self.model_name, Color::Default.fg_escape());
@@ -403,6 +468,66 @@ impl Widget for InputBarWidget {
                 } => {
                     self.confirming = false;
                     Action::ConfirmNo
+                }
+                _ => Action::None,
+            }
+        } else if self.questioning {
+            // In question mode, accept typing and Enter to submit
+            match key {
+                KeyEvent {
+                    key: Key::Enter,
+                    modifiers,
+                } if !modifiers.shift => {
+                    let text = self.take_input();
+                    self.questioning = false;
+                    if text.trim().is_empty() {
+                        // Empty input — skip the question
+                        Action::AnswerQuestion("Skipped (no answer provided)".to_string())
+                    } else {
+                        // Check if the user typed a number matching an option
+                        let trimmed = text.trim();
+                        if let Ok(num) = trimmed.parse::<usize>() {
+                            if num >= 1 && num <= self.question_answer_count {
+                                // Number input — will be resolved by the app
+                                Action::AnswerQuestion(trimmed.to_string())
+                            } else {
+                                // Out of range number — treat as free-form input
+                                Action::AnswerQuestion(trimmed.to_string())
+                            }
+                        } else {
+                            // Free-form text answer
+                            Action::AnswerQuestion(trimmed.to_string())
+                        }
+                    }
+                }
+                KeyEvent {
+                    key: Key::Escape, ..
+                } => {
+                    self.questioning = false;
+                    Action::AnswerQuestion("Skipped (no answer provided)".to_string())
+                }
+                KeyEvent {
+                    key: Key::Char(c),
+                    modifiers,
+                } if !modifiers.ctrl && !modifiers.alt => {
+                    self.content.insert(self.cursor, *c);
+                    self.cursor += c.len_utf8();
+                    self.reset_tab_cycle();
+                    Action::None
+                }
+                KeyEvent {
+                    key: Key::Backspace,
+                    ..
+                } => {
+                    if self.cursor > 0 {
+                        let prev_char = self.content[..self.cursor].chars().next_back();
+                        if let Some(ch) = prev_char {
+                            self.cursor -= ch.len_utf8();
+                            self.content.remove(self.cursor);
+                        }
+                    }
+                    self.reset_tab_cycle();
+                    Action::None
                 }
                 _ => Action::None,
             }
