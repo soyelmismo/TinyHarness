@@ -233,6 +233,28 @@ async fn run_tui_mode(
     }
     app.sync_from_state();
 
+    // Populate sidebar with project context
+    {
+        let sidebar = app.sidebar_mut();
+        sidebar.project_name = ctx.workspace_ctx.project_name.clone();
+        sidebar.project_type = ctx.workspace_ctx.project_type.clone();
+        sidebar.git_branch = if ctx.workspace_ctx.is_git_repo {
+            std::process::Command::new("git")
+                .args(["branch", "--show-current"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                })
+        } else {
+            None
+        };
+        sidebar.build_command = ctx.workspace_ctx.build_command.clone();
+        sidebar.test_command = ctx.workspace_ctx.test_command.clone();
+        sidebar.structure = ctx.workspace_ctx.structure.clone();
+    }
+
     // If resuming a session, populate the conversation with existing messages
     for msg in messages.iter() {
         match msg.role {

@@ -12,7 +12,7 @@ use super::backend::Backend;
 use super::event::{Event, EventParser, Key, KeyEvent, MouseEvent};
 use super::layout::{Constraint, Direction, Layout, Rect};
 use super::screen::Screen;
-use super::terminal::Terminal;
+use super::terminal::{Size, Terminal};
 use super::widget::{Action, Widget};
 use super::widgets::conversation::{ConversationLine, ConversationWidget};
 use super::widgets::input_bar::InputBarWidget;
@@ -392,44 +392,71 @@ impl<B: Backend> TuiApp<B> {
             }
         }
 
-        // Resize events
+        // Resize events — update terminal size and screen buffers
         if let Event::Resize { cols, rows } = event {
             self.screen.resize(*cols, *rows);
             self.prev_screen.resize(*cols, *rows);
+            self.terminal.update_size();
             return Action::None;
         }
 
-        // Mouse scroll events always go to the conversation widget
+        // Mouse scroll and PageUp/PageDown/Home/End go to the focused scrollable widget
         if let Event::Mouse(MouseEvent::ScrollUp { .. }) = event {
-            self.conversation.scroll_up(3);
+            match self.focus {
+                Focus::Sidebar => {
+                    self.sidebar.scroll_up(3);
+                }
+                _ => {
+                    self.conversation.scroll_up(3);
+                }
+            }
             return Action::None;
         }
         if let Event::Mouse(MouseEvent::ScrollDown { .. }) = event {
-            self.conversation.scroll_down(3);
+            match self.focus {
+                Focus::Sidebar => {
+                    self.sidebar.scroll_down(3);
+                }
+                _ => {
+                    self.conversation.scroll_down(3);
+                }
+            }
             return Action::None;
         }
 
-        // Scroll-related key events always go to the conversation widget
+        // Scroll-related key events go to the focused scrollable widget
         if let Event::Key(key) = event {
             match key {
                 KeyEvent {
                     key: Key::PageUp, ..
                 } => {
-                    self.conversation.scroll_up(20);
+                    match self.focus {
+                        Focus::Sidebar => self.sidebar.scroll_up(10),
+                        _ => self.conversation.scroll_up(20),
+                    }
                     return Action::None;
                 }
                 KeyEvent {
                     key: Key::PageDown, ..
                 } => {
-                    self.conversation.scroll_down(20);
+                    match self.focus {
+                        Focus::Sidebar => self.sidebar.scroll_down(10),
+                        _ => self.conversation.scroll_down(20),
+                    }
                     return Action::None;
                 }
                 KeyEvent { key: Key::Home, .. } => {
-                    self.conversation.scroll_home();
+                    match self.focus {
+                        Focus::Sidebar => self.sidebar.scroll_home(),
+                        _ => self.conversation.scroll_home(),
+                    }
                     return Action::None;
                 }
                 KeyEvent { key: Key::End, .. } => {
-                    self.conversation.scroll_to_bottom();
+                    match self.focus {
+                        Focus::Sidebar => { /* sidebar has no scroll-to-bottom */ }
+                        _ => self.conversation.scroll_to_bottom(),
+                    }
                     return Action::None;
                 }
                 KeyEvent {
@@ -938,10 +965,14 @@ pub struct ConversationMut<'a>(pub &'a mut ConversationWidget);
 
 /// Spawns a background thread that reads raw bytes from stdin and parses
 /// them into events, sending them through a channel.
+///
+/// Also spawns a SIGWINCH signal handler thread that detects terminal resizes
+/// and injects `Event::Resize` events into the same channel.
 pub fn spawn_stdin_reader() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>) {
     let (tx, rx) = mpsc::channel();
-    let tx_clone = tx.clone();
 
+    // Stdin reader thread
+    let stdin_tx = tx.clone();
     std::thread::spawn(move || {
         let mut parser = EventParser::new();
         let mut buf = [0u8; 64];
@@ -952,7 +983,7 @@ pub fn spawn_stdin_reader() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>) {
                 Ok(n) => {
                     parser.feed(&buf[..n]);
                     while let Some(event) = parser.parse() {
-                        if tx.send(event).is_err() {
+                        if stdin_tx.send(event).is_err() {
                             return; // Receiver dropped
                         }
                     }
@@ -962,7 +993,45 @@ pub fn spawn_stdin_reader() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>) {
         }
     });
 
-    (tx_clone, rx)
+    // SIGWINCH handler thread — detects terminal resize and sends Resize events
+    let resize_tx = tx.clone();
+    std::thread::spawn(move || {
+        #[cfg(unix)]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering as SignalOrdering};
+
+            let resize_flag = std::sync::Arc::new(AtomicBool::new(false));
+            // Register SIGWINCH handler — clones the Arc so we can still read the flag
+            if signal_hook::flag::register(signal_hook::consts::SIGWINCH, resize_flag.clone())
+                .is_err()
+            {
+                // Could not register signal handler — resize detection disabled
+                return;
+            }
+
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                if resize_flag.swap(false, SignalOrdering::SeqCst) {
+                    if let Ok(size) = Size::from_terminal() {
+                        let _ = resize_tx.send(Event::Resize {
+                            cols: size.cols,
+                            rows: size.rows,
+                        });
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = resize_tx;
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    });
+
+    (tx, rx)
 }
 
 #[cfg(test)]
