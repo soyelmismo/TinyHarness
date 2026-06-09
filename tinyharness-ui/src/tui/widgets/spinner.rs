@@ -7,8 +7,7 @@ use crate::tui::layout::Rect;
 use crate::tui::screen::Screen;
 use crate::tui::widget::Widget;
 
-/// Spinner frames (Braille animation).
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+use crate::style::SPINNER_FRAMES;
 
 /// A simple animated spinner shown during streaming responses.
 pub struct SpinnerWidget {

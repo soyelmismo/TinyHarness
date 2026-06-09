@@ -590,6 +590,3 @@ async fn execute_generic_tool<W: Write>(
         images,
     }
 }
-
-/// Spinner frames used during tool execution.
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

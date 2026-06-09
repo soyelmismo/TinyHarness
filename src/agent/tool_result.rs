@@ -118,3 +118,59 @@ pub fn log_tool_audit(
         );
     }
 }
+
+/// Compute a plain-text diff for a tool call (edit or write).
+///
+/// Returns `None` for non-edit/write tools, or if the diff is empty.
+/// Returns `Some(diff_string)` with the diff content otherwise.
+///
+/// This is used for both:
+/// - Confirmation previews (before the tool executes)
+/// - Display content (after the tool executes, to show what changed)
+pub fn compute_tool_diff(tool_name: &str, arguments: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "edit" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let old_str = arguments
+                .get("old_str")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_str = arguments
+                .get("new_str")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let diff =
+                tinyharness_ui::ui::diff::compute_edit_diff_from_path(path, old_str, new_str);
+            if diff.is_empty() { None } else { Some(diff) }
+        }
+        "write" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let content = arguments
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let diff = tinyharness_ui::ui::diff::compute_write_diff_plain(path, content);
+            if diff.is_empty() { None } else { Some(diff) }
+        }
+        _ => None,
+    }
+}
+
+/// Build the display content for a tool result, appending a diff for edit/write tools.
+///
+/// If the tool is edit or write and the diff is non-empty, the diff is prepended
+/// to the result. Otherwise, the result is returned as-is.
+pub fn tool_display_content(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    result: &str,
+    is_error: bool,
+) -> String {
+    if is_error {
+        return result.to_string();
+    }
+    match compute_tool_diff(tool_name, arguments) {
+        Some(diff) if !diff.is_empty() => format!("{}\n{}", diff.trim_end(), result),
+        _ => result.to_string(),
+    }
+}

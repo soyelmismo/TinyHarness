@@ -34,7 +34,10 @@ use super::command_result;
 use super::confirm::ConfirmationDecision;
 use super::display::format_args_summary_tui;
 use super::signal::{self, SignalResult};
-use super::tool_result::{GenericToolResult, batch_tool_results, log_tool_audit};
+use super::tool_result::{
+    GenericToolResult, audit_info_for_tool, batch_tool_results, compute_tool_diff, log_tool_audit,
+    tool_display_content,
+};
 
 /// Strip common ANSI SGR escape sequences from a string.
 ///
@@ -742,8 +745,7 @@ async fn handle_tui_tool_calls(
                 // Ask the user via the TUI confirmation flow
                 let args_summary =
                     format_args_summary_tui(&call.function.name, &call.function.arguments);
-                let diff_preview =
-                    compute_diff_preview(&call.function.name, &call.function.arguments);
+                let diff_preview = compute_tool_diff(&call.function.name, &call.function.arguments);
                 let _ = agent_event_tx.send(TuiAgentEvent::ConfirmTool {
                     name: call.function.name.clone(),
                     args_summary: args_summary.clone(),
@@ -816,62 +818,12 @@ async fn handle_tui_tool_calls(
 
         let is_error = result.starts_with("Error:");
 
-        // For edit/write tools, compute a diff and include it in the TUI display
-        let display_content = if !is_error {
-            match call.function.name.as_str() {
-                "edit" => {
-                    let path = call
-                        .function
-                        .arguments
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let old_str = call
-                        .function
-                        .arguments
-                        .get("old_str")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let new_str = call
-                        .function
-                        .arguments
-                        .get("new_str")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let diff = tinyharness_ui::ui::diff::compute_edit_diff_from_path(
-                        path, old_str, new_str,
-                    );
-                    if diff.is_empty() {
-                        result.clone()
-                    } else {
-                        format!("{}\n{}", diff.trim_end(), result)
-                    }
-                }
-                "write" => {
-                    let path = call
-                        .function
-                        .arguments
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let content = call
-                        .function
-                        .arguments
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let diff = tinyharness_ui::ui::diff::compute_write_diff_plain(path, content);
-                    if diff.is_empty() {
-                        result.clone()
-                    } else {
-                        format!("{}\n{}", diff.trim_end(), result)
-                    }
-                }
-                _ => result.clone(),
-            }
-        } else {
-            result.clone()
-        };
+        let display_content = tool_display_content(
+            &call.function.name,
+            &call.function.arguments,
+            &result,
+            is_error,
+        );
 
         let _ = agent_event_tx.send(TuiAgentEvent::ToolResult {
             name: call.function.name.clone(),
@@ -883,23 +835,11 @@ async fn handle_tui_tool_calls(
         log_tool_audit(session.id(), call, auto_accepted, duration_ms, is_error);
 
         // Collect result for batching
+        let (audit_tool_name, audit_detail) = audit_info_for_tool(call);
         generic_tool_results.push(GenericToolResult {
             content: format!("### {} Tool Result\n\n{}", call.function.name, result),
-            audit_tool_name: if matches!(call.function.name.as_str(), "run" | "write" | "edit") {
-                Some(call.function.name.clone())
-            } else {
-                None
-            },
-            audit_detail: call
-                .function
-                .arguments
-                .get(if call.function.name == "run" {
-                    "command"
-                } else {
-                    "path"
-                })
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+            audit_tool_name,
+            audit_detail,
             duration_ms,
             is_error,
             images: vec![],
@@ -913,38 +853,4 @@ async fn handle_tui_tool_calls(
     }
 
     true
-}
-
-/// Compute a plain-text diff preview for a destructive tool call (edit/write).
-///
-/// Returns `Some(diff_string)` for edit and write tools, `None` otherwise.
-/// The diff is computed *before* the tool is executed so the user can review
-/// the pending changes before confirming.
-fn compute_diff_preview(tool_name: &str, arguments: &serde_json::Value) -> Option<String> {
-    match tool_name {
-        "edit" => {
-            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let old_str = arguments
-                .get("old_str")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let new_str = arguments
-                .get("new_str")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let diff =
-                tinyharness_ui::ui::diff::compute_edit_diff_from_path(path, old_str, new_str);
-            if diff.is_empty() { None } else { Some(diff) }
-        }
-        "write" => {
-            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let content = arguments
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let diff = tinyharness_ui::ui::diff::compute_write_diff_plain(path, content);
-            if diff.is_empty() { None } else { Some(diff) }
-        }
-        _ => None,
-    }
 }

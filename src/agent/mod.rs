@@ -5,7 +5,6 @@ pub mod input;
 pub mod safety;
 pub mod setup;
 pub mod signal;
-pub mod stream;
 pub mod tool_result;
 pub mod tools;
 pub mod tui_loop;
