@@ -28,11 +28,13 @@ use tinyharness_lib::{
 use tinyharness_ui::output::Output;
 use tinyharness_ui::tui::{TuiAgentEvent, TuiUserAction};
 
-use crate::commands::compact::execute_compact;
 use crate::commands::{CommandContext, CommandResult, build_registry};
 
+use super::command_result;
+use super::confirm::ConfirmationDecision;
 use super::display::format_args_summary_tui;
-use super::safety::is_safe_command;
+use super::signal::{self, SignalResult};
+use super::tool_result::{GenericToolResult, batch_tool_results, log_tool_audit};
 
 /// Strip common ANSI SGR escape sequences from a string.
 ///
@@ -132,9 +134,69 @@ async fn dispatch_command_to_tui(
     result
 }
 
-/// Spinner frames used during tool execution (same as CLI mode).
-#[allow(dead_code)]
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Render a signal result to the TUI via channel events.
+fn render_signal_result_tui(result: &SignalResult, agent_event_tx: &mpsc::Sender<TuiAgentEvent>) {
+    match result {
+        SignalResult::SwitchMode {
+            old_mode: _,
+            new_mode,
+            already_in,
+        } => {
+            if *already_in {
+                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
+                    "Already in '{}' mode. No change was made.",
+                    new_mode
+                )));
+            } else {
+                let _ = agent_event_tx.send(TuiAgentEvent::ModeChanged(new_mode.to_string()));
+            }
+        }
+        SignalResult::AutoCompact {
+            focus: _,
+            success,
+            error,
+        } => {
+            if *success {
+                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(
+                    "Conversation compacted successfully.".to_string(),
+                ));
+            } else if let Some(e) = error {
+                let _ = agent_event_tx
+                    .send(TuiAgentEvent::Error(format!("Auto-compact failed: {}", e)));
+            }
+        }
+        SignalResult::InvokeSkill {
+            name,
+            description,
+            already_active,
+            found,
+        } => {
+            if *already_active {
+                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
+                    "Skill '{}' is already active",
+                    name
+                )));
+            } else if *found {
+                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
+                    "Skill activated: {} — {}",
+                    name, description
+                )));
+            } else {
+                let _ = agent_event_tx
+                    .send(TuiAgentEvent::Error(format!("Skill '{}' not found", name)));
+            }
+        }
+        SignalResult::Question { .. } => {
+            // Question is handled separately in the TUI loop
+        }
+        SignalResult::ParseError { tool_name } => {
+            let _ = agent_event_tx.send(TuiAgentEvent::Error(format!(
+                "Could not parse arguments for signal tool '{}'",
+                tool_name
+            )));
+        }
+    }
+}
 
 /// Background agent loop for TUI mode.
 ///
@@ -304,128 +366,42 @@ async fn process_slash_command(
     match dispatch_command_to_tui(input, ctx, messages, registry, agent_event_tx).await {
         Ok(CommandResult::Ok) => {
             // Update token usage from compaction side-channel
-            if let Some(usage) = ctx.compaction_token_usage.take() {
-                *last_known_token_usage = Some(usage.clone());
-                session.set_token_usage(usage);
+            if let Some(usage) = command_result::apply_ok(ctx, session) {
+                *last_known_token_usage = Some(usage);
             }
             // Send mode update if it changed
             let _ = agent_event_tx.send(TuiAgentEvent::ModeChanged(ctx.current_mode.to_string()));
         }
         Ok(CommandResult::SwitchSession(id_prefix)) => {
-            let store = tinyharness_lib::session::SessionStore::default_path();
-            match store.find_by_prefix(&id_prefix) {
-                Ok(full_id) => {
-                    session.flush();
-                    match store.load(&full_id) {
-                        Ok((new_session, loaded_msgs)) => {
-                            *session = new_session;
-                            *messages = loaded_msgs;
-                            ctx.current_mode = session.meta().mode;
-                            ctx.session_id = Some(session.id().to_string());
-                            *last_known_token_usage = session.meta().token_usage.clone();
-                            ctx.refresh_system_prompt(messages);
-
-                            let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
-                                "Switched to session {}",
-                                &full_id[..12]
-                            )));
-                            let _ = agent_event_tx
-                                .send(TuiAgentEvent::ModeChanged(ctx.current_mode.to_string()));
-                        }
-                        Err(e) => {
-                            let _ = agent_event_tx.send(TuiAgentEvent::Error(format!("{}", e)));
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = agent_event_tx.send(TuiAgentEvent::Error(format!("{}", e)));
-                }
+            let info = command_result::apply_switch_session(&id_prefix, ctx, messages, session);
+            if info.is_error {
+                let _ = agent_event_tx.send(TuiAgentEvent::Error(info.description));
+            } else {
+                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(info.description));
+                *last_known_token_usage = session.meta().token_usage.clone();
+                let _ =
+                    agent_event_tx.send(TuiAgentEvent::ModeChanged(ctx.current_mode.to_string()));
             }
         }
         Ok(CommandResult::RenameSession(new_name)) => {
-            session.set_name(new_name.clone());
-            let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
-                "Session renamed to {}",
-                new_name
-            )));
+            let info = command_result::apply_rename_session(&new_name, session);
+            let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(info.description));
         }
         Ok(CommandResult::Init(result)) => {
-            ctx.workspace_ctx = tinyharness_lib::context::WorkspaceContext::collect();
-            ctx.refresh_system_prompt(messages);
-            let msg = match &result {
-                crate::commands::init::InitResult::Created { path } => {
-                    format!("Created {}", path.display())
-                }
-                crate::commands::init::InitResult::Updated { path } => {
-                    format!("Updated {}", path.display())
-                }
-            };
-            let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(msg));
+            let info = command_result::apply_init(&result, ctx, messages);
+            let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(info.description));
         }
         Ok(CommandResult::SkillUse(skill_name)) => {
-            if ctx
-                .active_skills
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(&skill_name))
-            {
-                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
-                    "Skill '{}' is already active",
-                    skill_name
-                )));
-                return;
-            }
-            match ctx.skill_registry.get(&skill_name) {
-                Some(skill) => {
-                    ctx.active_skills.push(skill.name.clone());
-                    messages.push(Message {
-                        role: Role::User,
-                        content: format!("/use {}", skill_name),
-                        tool_calls: vec![],
-                        images: vec![],
-                    });
-                    session.append_message(messages.last().expect("just pushed a message"));
-                    ctx.refresh_system_prompt(messages);
-                    let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
-                        "Skill activated: {} — {}",
-                        skill_name, skill.description
-                    )));
-                }
-                None => {
-                    let _ = agent_event_tx.send(TuiAgentEvent::Error(format!(
-                        "Skill '{}' not found",
-                        skill_name
-                    )));
-                }
+            let info = command_result::apply_skill_use(&skill_name, ctx, messages, session);
+            if info.is_error {
+                let _ = agent_event_tx.send(TuiAgentEvent::Error(info.description));
+            } else {
+                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(info.description));
             }
         }
         Ok(CommandResult::SkillUnload(skill_name)) => {
-            let pos = ctx
-                .active_skills
-                .iter()
-                .position(|s| s.eq_ignore_ascii_case(&skill_name));
-            match pos {
-                Some(idx) => {
-                    let removed = ctx.active_skills.remove(idx);
-                    messages.push(Message {
-                        role: Role::User,
-                        content: format!("/unload {}", skill_name),
-                        tool_calls: vec![],
-                        images: vec![],
-                    });
-                    session.append_message(messages.last().expect("just pushed a message"));
-                    ctx.refresh_system_prompt(messages);
-                    let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
-                        "Skill deactivated: {}",
-                        removed
-                    )));
-                }
-                None => {
-                    let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
-                        "Skill '{}' is not active",
-                        skill_name
-                    )));
-                }
-            }
+            let info = command_result::apply_skill_unload(&skill_name, ctx, messages, session);
+            let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(info.description));
         }
         Err(e) => {
             let _ = agent_event_tx.send(TuiAgentEvent::Error(e));
@@ -690,49 +666,15 @@ async fn handle_tui_tool_calls(
             if let Some(event) =
                 tool_manager.parse_signal_event(&call.function.name, &call.function.arguments)
             {
-                match event {
-                    SignalEvent::SwitchMode { mode } => {
-                        let old_mode = ctx.current_mode;
-                        match ctx.switch_mode(mode, messages) {
-                            Ok(()) => {
-                                session.set_mode(mode);
-                                let _ = agent_event_tx
-                                    .send(TuiAgentEvent::ModeChanged(mode.to_string()));
-                                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(format!(
-                                    "Mode switched: {} → {}",
-                                    old_mode, mode
-                                )));
-                                messages.push(Message {
-                                    role: Role::Tool,
-                                    content: format!(
-                                        "SUCCESS: Mode switched from '{}' to '{}'.",
-                                        old_mode, mode
-                                    ),
-                                    tool_calls: vec![],
-                                    images: vec![],
-                                });
-                                session.append_message(
-                                    messages.last().expect("just pushed a message"),
-                                );
-                            }
-                            Err(msg) => {
-                                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(msg));
-                                messages.push(Message {
-                                    role: Role::Tool,
-                                    content: format!(
-                                        "Already in '{}' mode. No change was made.",
-                                        mode
-                                    ),
-                                    tool_calls: vec![],
-                                    images: vec![],
-                                });
-                                session.append_message(
-                                    messages.last().expect("just pushed a message"),
-                                );
-                            }
-                        }
-                    }
+                // Question signal requires user interaction — handle via TUI channel
+                match &event {
                     SignalEvent::Question { question, answers } => {
+                        // Validate question
+                        if let Some(error) = signal::validate_question(question, answers) {
+                            signal::apply_question_error(error, messages, session);
+                            continue;
+                        }
+
                         // Send the question to the TUI for user interaction
                         let _ = agent_event_tx.send(TuiAgentEvent::Question {
                             question: question.clone(),
@@ -764,259 +706,82 @@ async fn handle_tui_tool_calls(
                             }
                         };
 
-                        messages.push(Message {
-                            role: Role::Tool,
-                            content: format!(
-                                "User answered the question '{}' with: '{}'.",
-                                question, answer
-                            ),
-                            tool_calls: vec![],
-                            images: vec![],
-                        });
-                        session.append_message(messages.last().expect("just pushed a message"));
+                        let is_skip = answer.starts_with("Skipped");
+                        signal::apply_question_answer(
+                            question, &answer, is_skip, messages, session,
+                        );
                     }
-                    SignalEvent::AutoCompact { focus } => {
-                        let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(
-                            "Compacting conversation history...".to_string(),
-                        ));
-                        let mut provider_guard = provider.lock().await;
-                        match execute_compact(
-                            &mut ctx.output,
-                            &mut *provider_guard,
-                            messages,
-                            &focus,
-                        )
-                        .await
-                        {
-                            Ok(token_usage) => {
-                                if let Some(usage) = token_usage.clone() {
-                                    ctx.compaction_token_usage = Some(usage.clone());
-                                    session.set_token_usage(usage);
-                                }
-                                let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(
-                                    "Conversation compacted successfully.".to_string(),
-                                ));
-                                messages.push(Message {
-                                    role: Role::Tool,
-                                    content: format!(
-                                        "Conversation compacted successfully. Focus: '{}'.",
-                                        if focus.is_empty() {
-                                            "general summary"
-                                        } else {
-                                            &focus
-                                        }
-                                    ),
-                                    tool_calls: vec![],
-                                    images: vec![],
-                                });
-                                session.append_message(
-                                    messages.last().expect("just pushed a message"),
-                                );
-                            }
-                            Err(e) => {
-                                let _ = agent_event_tx.send(TuiAgentEvent::Error(format!(
-                                    "Auto-compact failed: {}",
-                                    e
-                                )));
-                                messages.push(Message {
-                                    role: Role::Tool,
-                                    content: format!(
-                                        "Auto-compact failed: {}. The conversation was not modified.",
-                                        e
-                                    ),
-                                    tool_calls: vec![],
-                                    images: vec![],
-                                });
-                                session.append_message(
-                                    messages.last().expect("just pushed a message"),
-                                );
-                            }
-                        }
-                    }
-                    SignalEvent::InvokeSkill { skill_name } => {
-                        let skill_result = {
-                            let registry = &ctx.skill_registry;
-                            registry
-                                .get(&skill_name)
-                                .map(|s| (s.name.clone(), s.description.clone()))
-                        };
-                        match skill_result {
-                            Some((name, description)) => {
-                                if ctx
-                                    .active_skills
-                                    .iter()
-                                    .any(|s| s.eq_ignore_ascii_case(&name))
-                                {
-                                    let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(
-                                        format!("Skill '{}' is already active", name),
-                                    ));
-                                    messages.push(Message {
-                                        role: Role::Tool,
-                                        content: format!("Skill '{}' is already active.", name),
-                                        tool_calls: vec![],
-                                        images: vec![],
-                                    });
-                                    session.append_message(
-                                        messages.last().expect("just pushed a message"),
-                                    );
-                                } else {
-                                    ctx.active_skills.push(name.clone());
-                                    messages.push(Message {
-                                        role: Role::User,
-                                        content: format!("/use {}", skill_name),
-                                        tool_calls: vec![],
-                                        images: vec![],
-                                    });
-                                    session.append_message(
-                                        messages.last().expect("just pushed a message"),
-                                    );
-                                    ctx.refresh_system_prompt(messages);
-                                    let _ = agent_event_tx.send(TuiAgentEvent::SystemMessage(
-                                        format!("Skill activated: {} — {}", name, description),
-                                    ));
-                                }
-                            }
-                            None => {
-                                let _ = agent_event_tx.send(TuiAgentEvent::Error(format!(
-                                    "Skill '{}' not found",
-                                    skill_name
-                                )));
-                                messages.push(Message {
-                                    role: Role::Tool,
-                                    content: format!("Error: Skill '{}' not found.", skill_name),
-                                    tool_calls: vec![],
-                                    images: vec![],
-                                });
-                                session.append_message(
-                                    messages.last().expect("just pushed a message"),
-                                );
-                            }
-                        }
+                    _ => {
+                        let result =
+                            signal::handle_signal_event(&event, messages, session, ctx, provider)
+                                .await;
+                        render_signal_result_tui(&result, agent_event_tx);
                     }
                 }
             } else {
-                messages.push(Message {
-                    role: Role::Tool,
-                    content: format!(
-                        "Error: Could not parse arguments for signal tool '{}'.",
-                        call.function.name
-                    ),
-                    tool_calls: vec![],
-                    images: vec![],
-                });
-                session.append_message(messages.last().expect("just pushed a message"));
+                signal::apply_signal_parse_error(&call.function.name, messages, session);
             }
             continue;
         }
 
         let needs_confirmation = tool_manager.needs_approval(&call.function.name);
 
-        // Determine approval
-        let (approved, auto_accepted) = if !needs_confirmation {
-            (true, false)
-        } else if *auto_accept {
-            // Auto-accept mode — check if it's a safe command
-            if call.function.name == "run" {
-                if let Some(cmd_value) = call.function.arguments.get("command")
-                    && let Some(cmd_str) = cmd_value.as_str()
-                    && is_safe_command(cmd_str, &safe_commands, &denied_commands)
-                {
-                    (true, true)
-                } else {
-                    // Unsafe run command — still require confirmation even in auto-accept mode
-                    // Ask the user via the TUI confirmation flow
-                    let args_summary =
-                        format_args_summary_tui(&call.function.name, &call.function.arguments);
-                    let diff_preview =
-                        compute_diff_preview(&call.function.name, &call.function.arguments);
-                    let _ = agent_event_tx.send(TuiAgentEvent::ConfirmTool {
-                        name: call.function.name.clone(),
-                        args_summary: args_summary.clone(),
-                        needs_approval: true,
-                        diff_preview,
-                    });
-                    // Wait for user response
-                    loop {
-                        match user_action_rx.recv() {
-                            Ok(TuiUserAction::ConfirmResponse {
-                                approved,
-                                auto_accept: resp_auto_accept,
-                            }) => {
-                                if resp_auto_accept {
-                                    *auto_accept = true;
-                                }
-                                break (approved, resp_auto_accept);
+        // Use shared decision logic for confirmation
+        let decision = super::confirm::decide_tool_confirmation(
+            call,
+            *auto_accept,
+            auto_accept_safe_commands,
+            &safe_commands,
+            &denied_commands,
+            needs_confirmation,
+        );
+
+        let (approved, auto_accepted) = match decision {
+            ConfirmationDecision::AutoApproved { auto_accepted: aa } => (true, aa),
+            ConfirmationDecision::NeedsConfirmation => {
+                // Ask the user via the TUI confirmation flow
+                let args_summary =
+                    format_args_summary_tui(&call.function.name, &call.function.arguments);
+                let diff_preview =
+                    compute_diff_preview(&call.function.name, &call.function.arguments);
+                let _ = agent_event_tx.send(TuiAgentEvent::ConfirmTool {
+                    name: call.function.name.clone(),
+                    args_summary: args_summary.clone(),
+                    needs_approval: true,
+                    diff_preview,
+                });
+                // Wait for user response
+                loop {
+                    match user_action_rx.recv() {
+                        Ok(TuiUserAction::ConfirmResponse {
+                            approved,
+                            auto_accept: resp_auto_accept,
+                        }) => {
+                            if resp_auto_accept {
+                                *auto_accept = true;
                             }
-                            Ok(TuiUserAction::Interrupt) => {
-                                interrupted.store(true, Ordering::SeqCst);
-                                break (false, false);
-                            }
-                            Ok(TuiUserAction::Quit) => {
-                                let _ = agent_event_tx.send(TuiAgentEvent::Done);
-                                return false;
-                            }
-                            Ok(_) => {
-                                // Ignore other actions while waiting for confirmation
-                                continue;
-                            }
-                            Err(_) => {
-                                // Channel closed
-                                return false;
-                            }
+                            break (approved, resp_auto_accept);
+                        }
+                        Ok(TuiUserAction::Interrupt) => {
+                            interrupted.store(true, Ordering::SeqCst);
+                            break (false, false);
+                        }
+                        Ok(TuiUserAction::Quit) => {
+                            let _ = agent_event_tx.send(TuiAgentEvent::Done);
+                            return false;
+                        }
+                        Ok(_) => {
+                            // Ignore other actions while waiting for confirmation
+                            continue;
+                        }
+                        Err(_) => {
+                            // Channel closed
+                            return false;
                         }
                     }
                 }
-            } else {
-                (true, true)
             }
-        } else if auto_accept_safe_commands
-            && call.function.name == "run"
-            && let Some(cmd_value) = call.function.arguments.get("command")
-            && let Some(cmd_str) = cmd_value.as_str()
-            && is_safe_command(cmd_str, &safe_commands, &denied_commands)
-        {
-            (true, true)
-        } else {
-            // Needs confirmation — ask the user via the TUI confirmation flow
-            let args_summary =
-                format_args_summary_tui(&call.function.name, &call.function.arguments);
-            let diff_preview = compute_diff_preview(&call.function.name, &call.function.arguments);
-            let _ = agent_event_tx.send(TuiAgentEvent::ConfirmTool {
-                name: call.function.name.clone(),
-                args_summary: args_summary.clone(),
-                needs_approval: true,
-                diff_preview,
-            });
-            // Wait for user response
-            loop {
-                match user_action_rx.recv() {
-                    Ok(TuiUserAction::ConfirmResponse {
-                        approved,
-                        auto_accept: resp_auto_accept,
-                    }) => {
-                        if resp_auto_accept {
-                            *auto_accept = true;
-                        }
-                        break (approved, resp_auto_accept);
-                    }
-                    Ok(TuiUserAction::Interrupt) => {
-                        interrupted.store(true, Ordering::SeqCst);
-                        break (false, false);
-                    }
-                    Ok(TuiUserAction::Quit) => {
-                        let _ = agent_event_tx.send(TuiAgentEvent::Done);
-                        return false;
-                    }
-                    Ok(_) => {
-                        // Ignore other actions while waiting for confirmation
-                        continue;
-                    }
-                    Err(_) => {
-                        // Channel closed
-                        return false;
-                    }
-                }
-            }
+            ConfirmationDecision::Denied => (false, false),
         };
 
         if !approved {
@@ -1115,27 +880,7 @@ async fn handle_tui_tool_calls(
         });
 
         // Log to audit if this was an auditable tool
-        if matches!(call.function.name.as_str(), "run" | "write" | "edit") {
-            let audit_detail = call
-                .function
-                .arguments
-                .get(if call.function.name == "run" {
-                    "command"
-                } else {
-                    "path"
-                })
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let exit_code = if is_error { -1 } else { 0 };
-            crate::commands::audit::log_command(
-                session.id(),
-                &call.function.name,
-                audit_detail.as_deref().unwrap_or(""),
-                exit_code,
-                auto_accepted,
-                duration_ms,
-            );
-        }
+        log_tool_audit(session.id(), call, auto_accepted, duration_ms, is_error);
 
         // Collect result for batching
         generic_tool_results.push(GenericToolResult {
@@ -1157,31 +902,13 @@ async fn handle_tui_tool_calls(
                 .map(|s| s.to_string()),
             duration_ms,
             is_error,
+            images: vec![],
         });
     }
 
     // Batch all generic tool results into a single message
-    if !generic_tool_results.is_empty() {
-        let batched_content = if generic_tool_results.len() == 1 {
-            generic_tool_results[0].content.clone()
-        } else {
-            format!(
-                "Multiple tool results ({} total):\n\n{}",
-                generic_tool_results.len(),
-                generic_tool_results
-                    .iter()
-                    .map(|r| r.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n---\n\n")
-            )
-        };
-
-        messages.push(Message {
-            role: Role::Tool,
-            content: batched_content,
-            tool_calls: vec![],
-            images: vec![],
-        });
+    if let Some(msg) = batch_tool_results(generic_tool_results) {
+        messages.push(msg);
         session.append_message(messages.last().expect("just pushed a message"));
     }
 
@@ -1220,14 +947,4 @@ fn compute_diff_preview(tool_name: &str, arguments: &serde_json::Value) -> Optio
         }
         _ => None,
     }
-}
-
-/// Result from executing a generic tool call in TUI mode.
-#[allow(dead_code)]
-struct GenericToolResult {
-    content: String,
-    audit_tool_name: Option<String>,
-    audit_detail: Option<String>,
-    duration_ms: u64,
-    is_error: bool,
 }
