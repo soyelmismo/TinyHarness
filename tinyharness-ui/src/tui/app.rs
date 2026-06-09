@@ -3,6 +3,7 @@
 // The main TUI application that owns all widgets, handles the event loop,
 // renders frames, and diff-updates the terminal.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -218,6 +219,18 @@ impl<B: Backend> TuiApp<B> {
         &mut self.status_bar
     }
 
+    /// Set command names and subcommand completions for the input bar's
+    /// tab-completion feature. Should be called once after construction,
+    /// before the event loop starts.
+    pub fn set_command_completions(
+        &mut self,
+        command_names: Vec<String>,
+        subcommands: HashMap<String, Vec<String>>,
+    ) {
+        self.input_bar
+            .set_command_completions(command_names, subcommands);
+    }
+
     // ── Update helpers ───────────────────────────────────────────────────
 
     /// Update all widgets from the current state.
@@ -409,8 +422,7 @@ impl<B: Backend> TuiApp<B> {
                     }
                     // Escape closes the overlay (explicit, not via catch-all)
                     KeyEvent {
-                        key: Key::Escape,
-                        ..
+                        key: Key::Escape, ..
                     } => {
                         self.help_visible = false;
                         self.help_scroll = 0;
@@ -735,11 +747,7 @@ impl<B: Backend> TuiApp<B> {
     /// is automatically exited when search is closed.
     fn cycle_focus(&mut self, forward: bool) {
         let order: Vec<Focus> = if self.tool_output_visible {
-            vec![
-                Focus::InputBar,
-                Focus::ToolOutput,
-                Focus::Structure,
-            ]
+            vec![Focus::InputBar, Focus::ToolOutput, Focus::Structure]
         } else {
             vec![Focus::InputBar, Focus::Structure]
         };
@@ -760,7 +768,8 @@ impl<B: Backend> TuiApp<B> {
     fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
         // Input bar is focused whenever we're in InputBar focus (unified with conversation)
-        self.input_bar.set_focus(matches!(focus, Focus::InputBar | Focus::Conversation));
+        self.input_bar
+            .set_focus(matches!(focus, Focus::InputBar | Focus::Conversation));
         // Update the status bar focus indicator
         let label = match focus {
             Focus::InputBar | Focus::Conversation => "input",
@@ -1158,14 +1167,8 @@ impl<B: Backend> TuiApp<B> {
         } else {
             "  Press Esc to close"
         };
-        self.screen.write_str(
-            hint_row,
-            content_x,
-            hint,
-            dim_fg,
-            overlay_bg,
-            Style::dim(),
-        );
+        self.screen
+            .write_str(hint_row, content_x, hint, dim_fg, overlay_bg, Style::dim());
 
         // Draw scroll position indicator inside the right border area
         // (placed between the border and content, not overlapping the border)

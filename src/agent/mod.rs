@@ -96,7 +96,14 @@ pub async fn run_agent_loop(
         &mut stdout,
     )?;
 
-    let helper = CommandHelper::new();
+    let helper = CommandHelper::with_commands(
+        registry
+            .command_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+        registry.subcommands(),
+    );
     let history_dir = std::env::var("HOME")
         .map(|h| std::path::PathBuf::from(h).join(".local/share/tinyharness"))
         .unwrap_or_else(|_| std::path::PathBuf::from(".tinyharness_history"));

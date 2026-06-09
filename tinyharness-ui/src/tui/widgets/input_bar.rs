@@ -8,7 +8,7 @@ use crate::tui::event::{Event, Key, KeyEvent};
 use crate::tui::layout::Rect;
 use crate::tui::screen::Screen;
 use crate::tui::widget::{Action, Widget, styles};
-use crate::ui::input::{COMMAND_NAMES, subcommand_completions};
+use std::collections::HashMap;
 
 /// The input bar at the bottom of the screen.
 ///
@@ -52,10 +52,25 @@ pub struct InputBarWidget {
     question_answer_count: usize,
     /// Kill ring for Ctrl+K/U/W/Y emacs-style editing.
     kill_ring: String,
+    /// All known command names (primary + aliases), for tab completion.
+    command_names: Vec<String>,
+    /// Subcommand completions for commands that take arguments.
+    subcommands: HashMap<String, Vec<String>>,
 }
 
 impl InputBarWidget {
     pub fn new(mode_label: &str, model_name: &str) -> Self {
+        Self::with_commands(mode_label, model_name, Vec::new(), HashMap::new())
+    }
+
+    /// Create an `InputBarWidget` with command names and subcommand completions
+    /// for tab completion, typically sourced from the binary's `CommandRegistry`.
+    pub fn with_commands(
+        mode_label: &str,
+        model_name: &str,
+        command_names: Vec<String>,
+        subcommands: HashMap<String, Vec<String>>,
+    ) -> Self {
         let mode_color = match mode_label {
             "casual" => styles::MODE_CASUAL_FG,
             "planning" => styles::MODE_PLANNING_FG,
@@ -81,6 +96,8 @@ impl InputBarWidget {
             questioning: false,
             question_answer_count: 0,
             kill_ring: String::new(),
+            command_names,
+            subcommands,
         }
     }
 
@@ -114,6 +131,16 @@ impl InputBarWidget {
             _ => Color::WHITE,
         };
         self.model_name = model_name.to_string();
+    }
+
+    /// Set command names and subcommand completions for tab completion.
+    pub fn set_command_completions(
+        &mut self,
+        command_names: Vec<String>,
+        subcommands: HashMap<String, Vec<String>>,
+    ) {
+        self.command_names = command_names;
+        self.subcommands = subcommands;
     }
 
     /// Calculate which line and column the cursor is on.
@@ -250,7 +277,11 @@ impl InputBarWidget {
             let cmd = &self.content[..space_pos].to_lowercase();
             let current_arg = self.content[space_pos + 1..].trim_start().to_lowercase();
 
-            let subs = subcommand_completions(cmd);
+            let subs = self
+                .subcommands
+                .get(cmd)
+                .map(|s| s.as_slice())
+                .unwrap_or(&[]);
             if subs.is_empty() {
                 return false;
             }
@@ -265,7 +296,7 @@ impl InputBarWidget {
                 self.tab_cycle_subcommand = true;
             }
 
-            let matches: Vec<&&str> = subs
+            let matches: Vec<&String> = subs
                 .iter()
                 .filter(|s| s.starts_with(&self.tab_cycle_prefix))
                 .collect();
@@ -298,7 +329,8 @@ impl InputBarWidget {
                 // The current content is a completed command name — don't update prefix.
             }
 
-            let matches: Vec<&&str> = COMMAND_NAMES
+            let matches: Vec<&String> = self
+                .command_names
                 .iter()
                 .filter(|name| name.starts_with(&self.tab_cycle_prefix))
                 .collect();
@@ -1000,6 +1032,98 @@ mod tests {
     use super::*;
     use crate::tui::event::Modifiers;
 
+    /// Standard command names used in tests.
+    fn test_command_names() -> Vec<String> {
+        vec![
+            "/add",
+            "/agent",
+            "/apikey",
+            "/audit",
+            "/autoaccept",
+            "/casual",
+            "/clear",
+            "/command",
+            "/compact",
+            "/context",
+            "/contextlimit",
+            "/drop",
+            "/dropall",
+            "/exit",
+            "/files",
+            "/help",
+            "/init",
+            "/mode",
+            "/model",
+            "/plan",
+            "/project-settings",
+            "/quit",
+            "/refresh",
+            "/rename",
+            "/retries",
+            "/research",
+            "/session",
+            "/sessions",
+            "/settings",
+            "/showthink",
+            "/skill",
+            "/skills",
+            "/think",
+            "/timeout",
+            "/unload",
+            "/use",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    /// Standard subcommand completions used in tests.
+    fn test_subcommands() -> HashMap<String, Vec<String>> {
+        let mut subs = HashMap::new();
+        subs.insert(
+            "/command".to_string(),
+            vec![
+                "add".into(),
+                "deny".into(),
+                "help".into(),
+                "list".into(),
+                "rm".into(),
+                "reset".into(),
+                "resetdeny".into(),
+                "undeny".into(),
+            ],
+        );
+        subs.insert("/session".to_string(), vec!["delete".into()]);
+        subs.insert(
+            "/mode".to_string(),
+            vec![
+                "agent".into(),
+                "casual".into(),
+                "planning".into(),
+                "research".into(),
+            ],
+        );
+        subs.insert("/settings".to_string(), vec!["all".into()]);
+        subs.insert("/autoaccept".to_string(), vec!["off".into(), "on".into()]);
+        subs.insert("/apikey".to_string(), vec!["clear".into()]);
+        subs.insert("/showthink".to_string(), vec!["off".into(), "on".into()]);
+        subs.insert(
+            "/think".to_string(),
+            vec!["high".into(), "low".into(), "medium".into(), "off".into()],
+        );
+        subs
+    }
+
+    /// Create an InputBarWidget with test command data for tab-completion tests.
+    fn bar_with_commands(mode_label: &str, model_name: &str) -> InputBarWidget {
+        InputBarWidget::with_commands(
+            mode_label,
+            model_name,
+            test_command_names(),
+            test_subcommands(),
+        )
+    }
+
     #[test]
     fn test_input_bar_new() {
         let bar = InputBarWidget::new("agent", "llama3.1:8b");
@@ -1102,7 +1226,7 @@ mod tests {
 
     #[test]
     fn test_tab_complete_command() {
-        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        let mut bar = bar_with_commands("agent", "llama3.1:8b");
         bar.content = "/mod".to_string();
         bar.cursor = 4;
 
@@ -1117,7 +1241,7 @@ mod tests {
 
     #[test]
     fn test_tab_complete_cycle() {
-        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        let mut bar = bar_with_commands("agent", "llama3.1:8b");
         bar.content = "/co".to_string();
         bar.cursor = 3;
 
@@ -1147,7 +1271,7 @@ mod tests {
 
     #[test]
     fn test_tab_complete_resets_on_typing() {
-        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        let mut bar = bar_with_commands("agent", "llama3.1:8b");
         bar.content = "/mod".to_string();
         bar.cursor = 4;
 
@@ -1174,7 +1298,7 @@ mod tests {
 
     #[test]
     fn test_tab_complete_subcommand() {
-        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        let mut bar = bar_with_commands("agent", "llama3.1:8b");
         bar.content = "/command a".to_string();
         bar.cursor = 10;
 
@@ -1217,7 +1341,7 @@ mod tests {
 
     #[test]
     fn test_tab_complete_empty_prefix() {
-        let mut bar = InputBarWidget::new("agent", "llama3.1:8b");
+        let mut bar = bar_with_commands("agent", "llama3.1:8b");
         bar.content = "/".to_string();
         bar.cursor = 1;
 

@@ -22,7 +22,10 @@ use tinyharness_lib::{
 
 use crate::agent::setup as agent_setup;
 use crate::agent::tui_loop::run_tui_agent_loop;
-use crate::{agent::run_agent_loop, commands::CommandContext};
+use crate::{
+    agent::run_agent_loop,
+    commands::{CommandContext, build_registry},
+};
 use clap::Parser;
 use tinyharness_ui::output::Output;
 use tinyharness_ui::style::*;
@@ -188,6 +191,7 @@ fn create_initial_session(
 /// The agent loop runs in a background tokio task, sending conversation
 /// updates to the TUI through a channel. The TUI reads events from stdin
 /// and agent events from the channel, rendering diff-based updates.
+#[allow(clippy::too_many_arguments)]
 async fn run_tui_mode(
     provider: Arc<Mutex<dyn Provider + Send + Sync>>,
     tool_manager: ToolManager,
@@ -196,6 +200,8 @@ async fn run_tui_mode(
     session: Session,
     interrupted: Arc<AtomicBool>,
     initial_prompt: Option<String>,
+    command_names: Vec<String>,
+    subcommands: std::collections::HashMap<String, Vec<String>>,
 ) -> Result<(), Box<dyn Error>> {
     use tinyharness_ui::tui::{TuiAgentEvent, TuiUserAction};
 
@@ -216,6 +222,7 @@ async fn run_tui_mode(
     let terminal = guard.take();
 
     let mut app = TuiApp::new(terminal, user_action_tx, agent_event_rx)?;
+    app.set_command_completions(command_names, subcommands);
 
     // Initialize TUI state from the session context
     {
@@ -491,6 +498,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ctx.current_mode = initial_mode;
     ctx.session_id = Some(session.id().to_string());
 
+    // Build the command registry to extract command names and subcommand
+    // completions for tab-completion (used by both TUI and CLI modes).
+    let reg = build_registry();
+    let command_names = reg
+        .command_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+    let subcommands = reg.subcommands();
+
     // ── TUI mode ──────────────────────────────────────────────────────────
     if args.tui {
         return run_tui_mode(
@@ -501,6 +518,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             session,
             interrupted,
             args.prompt,
+            command_names,
+            subcommands,
         )
         .await;
     }
