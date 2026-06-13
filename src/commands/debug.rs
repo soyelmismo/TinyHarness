@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use tinyharness_lib::config::load_settings;
 use tinyharness_lib::provider::{Message, Role};
 use tinyharness_ui::style::*;
 
@@ -52,6 +53,38 @@ pub fn execute(
     )
     .unwrap();
     writeln!(file, "Show thinking: {}", ctx.show_thinking).unwrap();
+    writeln!(file).unwrap();
+
+    // ── Provider diagnostics ───────────────────────────────────────────────
+    writeln!(file, "=== Provider Diagnostics ===").unwrap();
+    dump_provider_diagnostics(&mut file, ctx);
+    writeln!(file).unwrap();
+
+    // ── Token usage ────────────────────────────────────────────────────────
+    writeln!(file, "=== Token Usage ===").unwrap();
+    dump_token_usage(&mut file, ctx, messages);
+    writeln!(file).unwrap();
+
+    // ── Session metadata ───────────────────────────────────────────────────
+    if let Some(session_id) = &ctx.session_id {
+        writeln!(file, "=== Session Metadata ===").unwrap();
+        dump_session_metadata(&mut file, session_id);
+        writeln!(file).unwrap();
+    }
+
+    // ── Configuration snapshot ─────────────────────────────────────────────
+    writeln!(file, "=== Configuration Snapshot ===").unwrap();
+    dump_configuration_snapshot(&mut file);
+    writeln!(file).unwrap();
+
+    // ── Pending images ─────────────────────────────────────────────────────
+    writeln!(file, "=== Pending Images ===").unwrap();
+    dump_pending_images(&mut file, ctx);
+    writeln!(file).unwrap();
+
+    // ── Command lists ──────────────────────────────────────────────────────
+    writeln!(file, "=== Command Auto-Accept Lists ===").unwrap();
+    dump_command_lists(&mut file);
     writeln!(file).unwrap();
 
     // ── System prompt source ───────────────────────────────────────────────
@@ -247,6 +280,200 @@ pub fn execute(
     Ok(CommandResult::Ok)
 }
 
+// ── Diagnostic helpers ───────────────────────────────────────────────────────
+
+fn dump_provider_diagnostics(file: &mut std::fs::File, _ctx: &CommandContext) {
+    let settings = load_settings();
+
+    writeln!(file, "Provider kind: {}", settings.last_provider).unwrap();
+
+    if let Some(url) = &settings.last_provider_url {
+        writeln!(file, "Provider URL: {}", url).unwrap();
+    } else {
+        writeln!(file, "Provider URL: (not set)").unwrap();
+    }
+
+    writeln!(
+        file,
+        "Current model: {}",
+        settings.last_model.as_deref().unwrap_or("(none)")
+    )
+    .unwrap();
+
+    writeln!(file, "Timeout: {}s", settings.ollama_timeout_secs).unwrap();
+    writeln!(file, "Max retries: {}", settings.ollama_max_retries).unwrap();
+    writeln!(file, "Think type: {}", settings.ollama_think_type).unwrap();
+    writeln!(
+        file,
+        "API key configured: {}",
+        settings.ollama_api_key.is_some()
+    )
+    .unwrap();
+}
+
+fn dump_token_usage(file: &mut std::fs::File, ctx: &CommandContext, messages: &[Message]) {
+    // Last known token usage from compaction or provider response.
+    if let Some(usage) = &ctx.compaction_token_usage {
+        writeln!(file, "Last known prompt tokens: {}", usage.prompt_tokens).unwrap();
+        writeln!(
+            file,
+            "Last known completion tokens: {}",
+            usage.completion_tokens
+        )
+        .unwrap();
+        writeln!(file, "Last known total tokens: {}", usage.total_tokens).unwrap();
+    } else {
+        writeln!(file, "Last known token usage: (none)").unwrap();
+    }
+
+    // Rough estimate: ~4 characters per token across all message contents.
+    let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+    let estimated_tokens = total_chars / 4;
+    writeln!(
+        file,
+        "Estimated context tokens (chars/4): {} ({} chars)",
+        estimated_tokens, total_chars
+    )
+    .unwrap();
+
+    if let Some(limit) = ctx.workspace_ctx.additional_project_mds.first() {
+        let _ = limit; // suppress unused warning if context_limit isn't implemented yet
+    }
+}
+
+fn dump_session_metadata(file: &mut std::fs::File, session_id: &str) {
+    use tinyharness_lib::session::SessionStore;
+
+    let store = SessionStore::default_path();
+    match store.load(session_id) {
+        Ok((session, _messages)) => {
+            let meta = session.meta();
+            writeln!(file, "Session ID: {}", meta.id).unwrap();
+            writeln!(file, "Working directory: {}", meta.working_dir).unwrap();
+            writeln!(file, "Created: {}", format_timestamp(meta.created_at)).unwrap();
+            writeln!(file, "Last updated: {}", format_timestamp(meta.updated_at)).unwrap();
+            writeln!(file, "Stored mode: {}", meta.mode).unwrap();
+            writeln!(file, "Stored provider: {}", meta.provider).unwrap();
+            writeln!(
+                file,
+                "Stored model: {}",
+                meta.model.as_deref().unwrap_or("(none)")
+            )
+            .unwrap();
+            if let Some(name) = &meta.name {
+                writeln!(file, "Session name: {}", name).unwrap();
+            }
+            writeln!(file, "Message count: {}", meta.message_count).unwrap();
+            if let Some(usage) = &meta.token_usage {
+                writeln!(
+                    file,
+                    "Stored token usage — prompt: {}, completion: {}, total: {}",
+                    usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                )
+                .unwrap();
+            }
+        }
+        Err(e) => {
+            writeln!(file, "Failed to load session metadata: {}", e).unwrap();
+        }
+    }
+}
+
+fn dump_configuration_snapshot(file: &mut std::fs::File) {
+    use tinyharness_lib::config::SettingsStore;
+
+    let settings = load_settings();
+    let store = SettingsStore::default_path();
+    writeln!(file, "Settings file: {}", store.path().display()).unwrap();
+
+    // Dump settings as pretty-printed JSON for diagnostics.
+    match serde_json::to_string_pretty(&settings) {
+        Ok(json) => {
+            writeln!(file, "Settings snapshot:").unwrap();
+            writeln!(file, "{}", json).unwrap();
+        }
+        Err(e) => {
+            writeln!(file, "Failed to serialize settings: {}", e).unwrap();
+        }
+    }
+}
+
+fn dump_pending_images(file: &mut std::fs::File, ctx: &CommandContext) {
+    if ctx.pending_images.is_empty() {
+        writeln!(file, "No images pending attachment.").unwrap();
+        return;
+    }
+
+    writeln!(file, "Pending images: {}", ctx.pending_images.len()).unwrap();
+    for (i, img) in ctx.pending_images.iter().enumerate() {
+        writeln!(
+            file,
+            "  [{}] {} ({} bytes, {})",
+            i + 1,
+            img.path.display(),
+            img.size_bytes,
+            img.mime_type
+        )
+        .unwrap();
+    }
+}
+
+fn dump_command_lists(file: &mut std::fs::File) {
+    use tinyharness_lib::config::get_default_safe_commands;
+
+    let settings = load_settings();
+
+    let safe: Vec<String> = settings
+        .safe_command_prefixes
+        .clone()
+        .unwrap_or_else(get_default_safe_commands);
+    let denied: Vec<String> = settings.denied_command_prefixes.clone().unwrap_or_default();
+
+    writeln!(
+        file,
+        "Auto-accept enabled: {}",
+        settings.auto_accept_safe_commands
+    )
+    .unwrap();
+    writeln!(file, "Safe command prefixes ({}):", safe.len()).unwrap();
+    for cmd in &safe {
+        writeln!(file, "  - {}", cmd).unwrap();
+    }
+    writeln!(file, "Denied command prefixes ({}):", denied.len()).unwrap();
+    for cmd in &denied {
+        writeln!(file, "  - {}", cmd).unwrap();
+    }
+}
+
+fn format_timestamp(unix_secs: u64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = std::time::SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(unix_secs))
+        .map(|t| t.duration_since(UNIX_EPOCH).ok())
+        .flatten()
+        .map(|d| d.as_secs());
+
+    if let Some(secs) = dt {
+        let days = secs / 86400;
+        let time_of_day = secs % 86400;
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+        let year = 1970 + days / 365;
+        format!(
+            "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+            year,
+            (days % 365) / 30 + 1,
+            days % 30 + 1,
+            hours,
+            minutes,
+            seconds
+        )
+    } else {
+        unix_secs.to_string()
+    }
+}
+
 /// Generate a timestamp string for the default filename.
 /// Falls back to a counter-based name if the system time is unavailable.
 fn chrono_now_or_fallback() -> String {
@@ -365,6 +592,11 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("=== Session Info ==="));
         assert!(content.contains("Mode:"));
+        assert!(content.contains("=== Provider Diagnostics ==="));
+        assert!(content.contains("=== Token Usage ==="));
+        assert!(content.contains("=== Configuration Snapshot ==="));
+        assert!(content.contains("=== Pending Images ==="));
+        assert!(content.contains("=== Command Auto-Accept Lists ==="));
         assert!(content.contains("=== System Prompt Source ==="));
         assert!(content.contains("=== Workspace Context ==="));
         assert!(content.contains("=== Pinned Files ==="));
