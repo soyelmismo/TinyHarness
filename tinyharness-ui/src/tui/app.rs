@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use super::TuiAgentEvent;
 use super::backend::Backend;
-use super::cell::Style;
+use super::cell::{Cell, Style};
 use super::event::{Event, EventParser, Key, KeyEvent, MouseButton, MouseEvent};
 use super::layout::{Constraint, Direction, Layout, Rect};
 use super::screen::Screen;
@@ -405,6 +405,12 @@ impl<B: Backend> TuiApp<B> {
 
     // ── Event handling ────────────────────────────────────────────────────
 
+    /// Dismiss the help overlay (close and reset scroll).
+    fn dismiss_help(&mut self) {
+        self.help_visible = false;
+        self.help_scroll = 0;
+    }
+
     /// Handle a single event and return any action.
     fn handle_event(&mut self, event: &Event) -> Action {
         // If help overlay is visible, handle scrolling and dismiss keys
@@ -416,45 +422,39 @@ impl<B: Backend> TuiApp<B> {
                         key: Key::Char('h'),
                         modifiers,
                     } if modifiers.ctrl => {
-                        self.help_visible = false;
-                        self.help_scroll = 0;
+                        self.dismiss_help();
                         return Action::None;
                     }
                     KeyEvent {
                         key: Key::F(1),
                         modifiers,
                     } if !modifiers.ctrl && !modifiers.alt => {
-                        self.help_visible = false;
-                        self.help_scroll = 0;
+                        self.dismiss_help();
                         return Action::None;
                     }
-                    // Escape closes the overlay (explicit, not via catch-all)
+                    // Escape closes the overlay
                     KeyEvent {
                         key: Key::Escape, ..
                     } => {
-                        self.help_visible = false;
-                        self.help_scroll = 0;
+                        self.dismiss_help();
                         return Action::None;
                     }
-                    // Ctrl+C passes through as quit/interrupt even when help is open
+                    // Ctrl+C and Ctrl+D pass through (close help first, then fall through)
                     KeyEvent {
                         key: Key::Char('c'),
                         modifiers,
                     } if modifiers.ctrl => {
-                        self.help_visible = false;
-                        self.help_scroll = 0;
+                        self.dismiss_help();
                         // Fall through to global handler below
                     }
-                    // Ctrl+D passes through as quit even when help is open
                     KeyEvent {
                         key: Key::Char('d'),
                         modifiers,
                     } if modifiers.ctrl => {
-                        self.help_visible = false;
-                        self.help_scroll = 0;
+                        self.dismiss_help();
                         // Fall through to global handler below
                     }
-                    // Scroll up
+                    // Scroll up (Up arrow or 'k')
                     KeyEvent {
                         key: Key::Up,
                         modifiers,
@@ -469,7 +469,7 @@ impl<B: Backend> TuiApp<B> {
                         self.help_scroll = self.help_scroll.saturating_sub(1);
                         return Action::None;
                     }
-                    // Scroll down
+                    // Scroll down (Down arrow or 'j')
                     KeyEvent {
                         key: Key::Down,
                         modifiers,
@@ -484,26 +484,23 @@ impl<B: Backend> TuiApp<B> {
                         self.help_scroll = self.help_scroll.saturating_add(1);
                         return Action::None;
                     }
-                    // Page up
+                    // Page up / Page down / Home / End
                     KeyEvent {
                         key: Key::PageUp, ..
                     } => {
                         self.help_scroll = self.help_scroll.saturating_sub(10);
                         return Action::None;
                     }
-                    // Page down
                     KeyEvent {
                         key: Key::PageDown, ..
                     } => {
                         self.help_scroll = self.help_scroll.saturating_add(10);
                         return Action::None;
                     }
-                    // Home — scroll to top
                     KeyEvent { key: Key::Home, .. } => {
                         self.help_scroll = 0;
                         return Action::None;
                     }
-                    // End — scroll to bottom
                     KeyEvent { key: Key::End, .. } => {
                         let content_height = self.help_content_height();
                         let max_scroll = self.help_line_count.saturating_sub(content_height);
@@ -512,8 +509,7 @@ impl<B: Backend> TuiApp<B> {
                     }
                     // Any other key dismisses the overlay
                     _ => {
-                        self.help_visible = false;
-                        self.help_scroll = 0;
+                        self.dismiss_help();
                         return Action::None;
                     }
                 }
@@ -530,7 +526,6 @@ impl<B: Backend> TuiApp<B> {
                     modifiers,
                 } if modifiers.ctrl => {
                     if self.state.streaming {
-                        // Interrupt streaming — notify the agent loop
                         self.set_streaming(false);
                         return Action::Interrupt;
                     }
@@ -567,13 +562,11 @@ impl<B: Backend> TuiApp<B> {
                     modifiers,
                 } if modifiers.ctrl => {
                     self.conversation.toggle_search();
-                    if self.conversation.is_search_active() {
-                        // Enter conversation focus for search input
-                        self.set_focus(Focus::Conversation);
+                    self.set_focus(if self.conversation.is_search_active() {
+                        Focus::Conversation
                     } else {
-                        // Search closed — return to input bar
-                        self.set_focus(Focus::InputBar);
-                    }
+                        Focus::InputBar
+                    });
                     return Action::None;
                 }
                 // F1 or Ctrl+H: toggle help overlay
@@ -651,36 +644,39 @@ impl<B: Backend> TuiApp<B> {
 
         // Scroll-related key events go to the focused scrollable widget
         if let Event::Key(key) = event {
+            let sidebar_focused = matches!(self.focus, Focus::Sidebar | Focus::Structure);
             match key {
                 KeyEvent {
                     key: Key::PageUp, ..
                 } => {
-                    match self.focus {
-                        Focus::Sidebar | Focus::Structure => self.sidebar.scroll_up(10),
-                        _ => self.conversation.scroll_up(20),
+                    if sidebar_focused {
+                        self.sidebar.scroll_up(10)
+                    } else {
+                        self.conversation.scroll_up(20)
                     }
                     return Action::None;
                 }
                 KeyEvent {
                     key: Key::PageDown, ..
                 } => {
-                    match self.focus {
-                        Focus::Sidebar | Focus::Structure => self.sidebar.scroll_down(10),
-                        _ => self.conversation.scroll_down(20),
+                    if sidebar_focused {
+                        self.sidebar.scroll_down(10)
+                    } else {
+                        self.conversation.scroll_down(20)
                     }
                     return Action::None;
                 }
                 KeyEvent { key: Key::Home, .. } => {
-                    match self.focus {
-                        Focus::Sidebar | Focus::Structure => self.sidebar.scroll_home(),
-                        _ => self.conversation.scroll_home(),
+                    if sidebar_focused {
+                        self.sidebar.scroll_home()
+                    } else {
+                        self.conversation.scroll_home()
                     }
                     return Action::None;
                 }
                 KeyEvent { key: Key::End, .. } => {
-                    match self.focus {
-                        Focus::Sidebar => { /* sidebar has no scroll-to-bottom */ }
-                        _ => self.conversation.scroll_to_bottom(),
+                    if !sidebar_focused {
+                        self.conversation.scroll_to_bottom()
                     }
                     return Action::None;
                 }
@@ -1033,79 +1029,21 @@ impl<B: Backend> TuiApp<B> {
         let dim_fg = Color::Ansi(244);
 
         // Draw background fill
-        for row in box_y..box_y + box_height {
-            for col in box_x..box_x + box_width {
-                if let Some(cell) = self.screen.get_mut(row, col) {
-                    cell.char = ' ';
-                    cell.wide = false;
-                    cell.fg = desc_fg;
-                    cell.bg = overlay_bg;
-                    cell.style = Style::default();
-                }
-            }
-        }
+        let box_rect = Rect::new(box_x, box_y, box_width, box_height);
+        self.screen.fill_rect(
+            box_rect,
+            Cell {
+                char: ' ',
+                fg: desc_fg,
+                bg: overlay_bg,
+                style: Style::default(),
+                wide: false,
+            },
+        );
 
-        // Draw border
-        // Top
-        if let Some(cell) = self.screen.get_mut(box_y, box_x) {
-            cell.char = '┌';
-            cell.wide = false;
-            cell.fg = border_fg;
-            cell.bg = overlay_bg;
-        }
-        for col in box_x + 1..box_x + box_width - 1 {
-            if let Some(cell) = self.screen.get_mut(box_y, col) {
-                cell.char = '─';
-                cell.wide = false;
-                cell.fg = border_fg;
-                cell.bg = overlay_bg;
-            }
-        }
-        if let Some(cell) = self.screen.get_mut(box_y, box_x + box_width - 1) {
-            cell.char = '┐';
-            cell.wide = false;
-            cell.fg = border_fg;
-            cell.bg = overlay_bg;
-        }
-        // Bottom
-        if let Some(cell) = self.screen.get_mut(box_y + box_height - 1, box_x) {
-            cell.char = '└';
-            cell.wide = false;
-            cell.fg = border_fg;
-            cell.bg = overlay_bg;
-        }
-        for col in box_x + 1..box_x + box_width - 1 {
-            if let Some(cell) = self.screen.get_mut(box_y + box_height - 1, col) {
-                cell.char = '─';
-                cell.wide = false;
-                cell.fg = border_fg;
-                cell.bg = overlay_bg;
-            }
-        }
-        if let Some(cell) = self
-            .screen
-            .get_mut(box_y + box_height - 1, box_x + box_width - 1)
-        {
-            cell.char = '┘';
-            cell.wide = false;
-            cell.fg = border_fg;
-            cell.bg = overlay_bg;
-        }
-        // Sides
-        for row in box_y + 1..box_y + box_height - 1 {
-            if let Some(cell) = self.screen.get_mut(row, box_x) {
-                cell.char = '│';
-                cell.wide = false;
-                cell.fg = border_fg;
-                cell.bg = overlay_bg;
-            }
-            if let Some(cell) = self.screen.get_mut(row, box_x + box_width - 1) {
-                cell.char = '│';
-                cell.wide = false;
-                cell.fg = border_fg;
-                cell.bg = overlay_bg;
-            }
-        }
+        // Draw border using the screen's draw_box method
+        self.screen
+            .draw_box(box_rect, border_fg, overlay_bg, Style::default());
 
         // Draw text lines (scrolled)
         let content_x = box_x + 1;
@@ -1377,6 +1315,18 @@ impl<B: Backend> TuiApp<B> {
         }
     }
 
+    /// Finalize any in-progress thinking block, updating the conversation
+    /// with the accumulated thinking text and clearing internal state.
+    fn finalize_thinking(&mut self) {
+        if self.is_thinking {
+            self.is_thinking = false;
+            if let Some(ConversationLine::Thinking { text: t }) = self.conversation.last_mut() {
+                *t = self.thinking_text.clone();
+            }
+            self.thinking_text.clear();
+        }
+    }
+
     /// Process an agent event received from the background task.
     fn handle_agent_event(&mut self, event: TuiAgentEvent) {
         match event {
@@ -1395,15 +1345,9 @@ impl<B: Backend> TuiApp<B> {
             }
             TuiAgentEvent::StreamingText(text) => {
                 // If we were thinking, finalize the thinking block first
-                if self.is_thinking {
-                    self.is_thinking = false;
-                    // Update the thinking line with accumulated text
-                    if let Some(ConversationLine::Thinking { text: t }) =
-                        self.conversation.last_mut()
-                    {
-                        *t = self.thinking_text.clone();
-                    }
-                    self.thinking_text.clear();
+                let was_thinking = self.is_thinking;
+                self.finalize_thinking();
+                if was_thinking {
                     self.input_bar.set_streaming_label("Responding");
                 }
                 self.streaming_text.push_str(&text);
@@ -1440,16 +1384,7 @@ impl<B: Backend> TuiApp<B> {
                 self.conversation.scroll_to_bottom();
             }
             TuiAgentEvent::StreamingDone => {
-                // Finalize thinking if still active
-                if self.is_thinking {
-                    self.is_thinking = false;
-                    if let Some(ConversationLine::Thinking { text: t }) =
-                        self.conversation.last_mut()
-                    {
-                        *t = self.thinking_text.clone();
-                    }
-                    self.thinking_text.clear();
-                }
+                self.finalize_thinking();
                 // Finalize the streaming text as a complete assistant message
                 if !self.streaming_text.is_empty() {
                     // The streaming text was already being displayed incrementally
@@ -1460,16 +1395,7 @@ impl<B: Backend> TuiApp<B> {
                 self.set_streaming(false);
             }
             TuiAgentEvent::Error(msg) => {
-                // Finalize thinking if still active
-                if self.is_thinking {
-                    self.is_thinking = false;
-                    if let Some(ConversationLine::Thinking { text: t }) =
-                        self.conversation.last_mut()
-                    {
-                        *t = self.thinking_text.clone();
-                    }
-                    self.thinking_text.clear();
-                }
+                self.finalize_thinking();
                 self.push_system_message(&format!("⚠ Error: {}", msg));
                 self.is_streaming = false;
                 self.set_streaming(false);
@@ -1543,16 +1469,7 @@ impl<B: Backend> TuiApp<B> {
                 self.pending_question_answers = answers;
             }
             TuiAgentEvent::Done => {
-                // Finalize thinking if still active
-                if self.is_thinking {
-                    self.is_thinking = false;
-                    if let Some(ConversationLine::Thinking { text: t }) =
-                        self.conversation.last_mut()
-                    {
-                        *t = self.thinking_text.clone();
-                    }
-                    self.thinking_text.clear();
-                }
+                self.finalize_thinking();
                 self.is_streaming = false;
                 self.set_streaming(false);
             }
