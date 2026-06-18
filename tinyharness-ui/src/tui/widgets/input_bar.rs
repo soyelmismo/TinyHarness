@@ -3,12 +3,125 @@
 // Multi-line input with history, cursor tracking, mode/model label,
 // and tab completion for slash commands.
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use crate::tui::cell::{Color, Style};
 use crate::tui::event::{Event, Key, KeyEvent};
 use crate::tui::layout::Rect;
 use crate::tui::screen::Screen;
-use crate::tui::widget::{Action, Widget, styles};
+use crate::tui::widget::{Action, Widget, styles, truncate_str_width};
 use std::collections::HashMap;
+
+/// Find the byte offset of the start of the previous word, stopping at newlines.
+fn word_start_backward(text: &str, cursor: usize) -> usize {
+    let before = &text[..cursor];
+    let trimmed = before.trim_end_matches(|c: char| c.is_whitespace() && c != '\n');
+    if trimmed.len() < before.len() {
+        trimmed
+            .rfind(|c: char| c.is_whitespace() || c == '\n')
+            .map(|p| p + 1)
+            .unwrap_or(0)
+    } else {
+        before
+            .rfind(|c: char| c.is_whitespace() || c == '\n')
+            .map(|p| p + 1)
+            .unwrap_or(0)
+    }
+}
+
+/// Find the byte offset after the next word, including trailing whitespace (but not newlines).
+fn word_end_forward(text: &str, cursor: usize) -> usize {
+    let after = &text[cursor..];
+    let word_end = after
+        .find(|c: char| c.is_whitespace() || c == '\n')
+        .unwrap_or(after.len());
+    let whitespace_skipped = after[word_end..]
+        .chars()
+        .take_while(|c| c.is_whitespace() && *c != '\n')
+        .count();
+    cursor + word_end + whitespace_skipped
+}
+
+/// A single visual row of input text, with byte range and screen column.
+struct InputRow<'a> {
+    /// The text slice to display on this row.
+    text: &'a str,
+    /// Byte offset of `text` within the full content.
+    byte_offset: usize,
+    /// Screen column where this row starts.
+    col: u16,
+}
+
+/// Compute the visual rows for input content, accounting for the prompt on
+/// the first line and Unicode display widths. Each row fits within
+/// `available_width` columns.
+fn input_rows<'a>(
+    content: &'a str,
+    prompt_width: u16,
+    area_x: u16,
+    available_width: u16,
+) -> Vec<InputRow<'a>> {
+    let mut rows = Vec::new();
+    let mut first_line = true;
+    let mut byte_offset = 0usize;
+
+    for line in content.split_inclusive('\n') {
+        let (line_text, _has_newline) = if let Some(stripped) = line.strip_suffix('\n') {
+            (stripped, true)
+        } else {
+            (line, false)
+        };
+
+        let left_col = if first_line {
+            area_x + prompt_width
+        } else {
+            area_x
+        };
+        first_line = false;
+
+        // Split the logical line into wrapped visual rows.
+        let mut row_start = 0usize;
+        let mut row_width = 0usize;
+        let first_line_indent = if row_start == 0 && left_col > area_x {
+            prompt_width as usize
+        } else {
+            0
+        };
+
+        for (idx, ch) in line_text.char_indices() {
+            let w = ch.width().unwrap_or(1);
+            if w == 0 {
+                // Combining marks don't occupy columns; skip for wrapping.
+                continue;
+            }
+            if row_width + first_line_indent + w > available_width as usize && row_width > 0 {
+                let end = idx;
+                rows.push(InputRow {
+                    text: &line_text[row_start..end],
+                    byte_offset: byte_offset + row_start,
+                    col: left_col,
+                });
+                row_start = idx;
+                row_width = 0;
+            }
+            row_width += w;
+        }
+
+        // Push the final row for this logical line.
+        rows.push(InputRow {
+            text: &line_text[row_start..],
+            byte_offset: byte_offset + row_start,
+            col: left_col,
+        });
+
+        byte_offset += line.len();
+    }
+
+    rows
+}
+
+/// Spinner animation frames (Braille patterns).
+const STREAMING_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// The input bar at the bottom of the screen.
 ///
@@ -18,6 +131,10 @@ use std::collections::HashMap;
 ///
 /// In confirmation mode, the input bar shows a `[y/n/a]?` prompt
 /// and only accepts y (approve), n (deny), or a (approve all) keys.
+///
+/// When the model is streaming/thinking, the input bar shows a spinner
+/// animation and label, blocking all input except Ctrl+C (interrupt)
+/// and Ctrl+D (quit).
 pub struct InputBarWidget {
     /// Current input text.
     content: String,
@@ -56,6 +173,12 @@ pub struct InputBarWidget {
     command_names: Vec<String>,
     /// Subcommand completions for commands that take arguments.
     subcommands: HashMap<String, Vec<String>>,
+    /// Whether the model is currently streaming/thinking.
+    streaming: bool,
+    /// The label to show while streaming (e.g., "Thinking", "Responding").
+    streaming_label: String,
+    /// Current spinner frame index (cycles through STREAMING_FRAMES).
+    streaming_frame: usize,
 }
 
 impl InputBarWidget {
@@ -98,6 +221,9 @@ impl InputBarWidget {
             kill_ring: String::new(),
             command_names,
             subcommands,
+            streaming: false,
+            streaming_label: String::from("Thinking"),
+            streaming_frame: 0,
         }
     }
 
@@ -143,23 +269,20 @@ impl InputBarWidget {
         self.subcommands = subcommands;
     }
 
-    /// Calculate which line and column the cursor is on.
-    #[allow(dead_code)]
-    fn cursor_line_col(&self) -> (usize, usize) {
-        let text_before_cursor = &self.content[..self.cursor];
-        let line = text_before_cursor.lines().count().saturating_sub(1);
-        let col = text_before_cursor
-            .lines()
-            .next_back()
-            .map(|l| l.len())
-            .unwrap_or(0);
-        (line, col)
-    }
-
-    /// Count the number of lines in the input.
-    #[allow(dead_code)]
-    fn line_count(&self) -> usize {
-        self.content.lines().count().max(1)
+    /// Total visual height of the input content for the given area width.
+    ///
+    /// When streaming, always returns 2 (border + spinner row) regardless of
+    /// content since input is blocked.
+    pub fn content_height(&self, area_width: u16) -> u16 {
+        if self.streaming {
+            return 2; // border + spinner row
+        }
+        let prompt = format!("[{}] ", self.mode_label);
+        let prompt_width = prompt.width() as u16;
+        let available = area_width.saturating_sub(prompt_width).max(1);
+        let rows = input_rows(&self.content, prompt_width, 0, available).len() as u16;
+        // Reserve one row for the top border and at least one row of content.
+        rows.max(1) + 1
     }
 
     /// Check if the current input starts with a slash (for command detection).
@@ -202,59 +325,67 @@ impl InputBarWidget {
         self.questioning
     }
 
+    /// Set the streaming state (model is thinking/responding).
+    ///
+    /// When streaming, the input bar shows a spinner animation and label,
+    /// and blocks all text input. Only Ctrl+C (interrupt) and Ctrl+D (quit)
+    /// are accepted.
+    pub fn set_streaming(&mut self, streaming: bool) {
+        self.streaming = streaming;
+        if streaming {
+            self.streaming_frame = 0;
+        }
+    }
+
+    /// Check if the input bar is in streaming mode.
+    pub fn is_streaming(&self) -> bool {
+        self.streaming
+    }
+
+    /// Set the streaming label (e.g., "Thinking", "Responding").
+    pub fn set_streaming_label(&mut self, label: &str) {
+        self.streaming_label = label.to_string();
+    }
+
+    /// Advance the spinner animation to the next frame.
+    pub fn tick_streaming(&mut self) {
+        if self.streaming {
+            self.streaming_frame = (self.streaming_frame + 1) % STREAMING_FRAMES.len();
+        }
+    }
+
     /// Handle a mouse click on the input bar to position the cursor.
     ///
     /// Computes where the user clicked relative to the prompt and text
     /// content, then moves the cursor to that position.
     pub fn click_to_cursor(&mut self, click_row: u16, click_col: u16, area: Rect) {
         if self.confirming || self.questioning {
-            // No cursor positioning in confirmation/question mode
             return;
         }
 
-        // The prompt is "[mode] " which takes some columns on the first input line
         let prompt = format!("[{}] ", self.mode_label);
-        let prompt_len = prompt.len() as u16;
+        let prompt_width = prompt.width() as u16;
+        let available = area.width.saturating_sub(prompt_width).max(1);
 
-        // First content line starts at area.y + 1 (below the top border)
         let first_input_row = area.y + 1;
+        let rel_row = click_row.saturating_sub(first_input_row) as usize;
 
-        // Determine which line of content was clicked (relative to first input row)
-        let line_offset = click_row.saturating_sub(first_input_row) as usize;
-
-        // Calculate the cursor position from the click
-        if line_offset == 0 {
-            // Clicked on the first line — account for the prompt prefix
-            let col_offset = click_col.saturating_sub(area.x + prompt_len) as usize;
-            // Move cursor to that character position within the first line
-            let first_line_len = self.content.lines().next().map(|l| l.len()).unwrap_or(0);
-            let new_pos = col_offset.min(first_line_len);
-            // The cursor position in the full string is at the start + new_pos
-            let line_start = 0;
-            self.cursor = line_start + new_pos;
-            if self.cursor > self.content.len() {
-                self.cursor = self.content.len();
-            }
-        } else {
-            // Clicked on a subsequent line — calculate byte offset for that line
-            let mut byte_offset = 0usize;
-            for (i, line) in self.content.lines().enumerate() {
-                if i == line_offset {
-                    // Found the target line
-                    let col_offset = click_col.saturating_sub(area.x) as usize;
-                    let new_pos = col_offset.min(line.len());
-                    self.cursor = byte_offset + new_pos;
-                    if self.cursor > self.content.len() {
-                        self.cursor = self.content.len();
-                    }
-                    return;
-                }
-                // +1 for the '\n' character
-                byte_offset += line.len() + 1;
-            }
-            // Click was past the last line — position cursor at end
+        let rows = input_rows(&self.content, prompt_width, area.x, available);
+        let Some(row) = rows.get(rel_row) else {
             self.cursor = self.content.len();
+            return;
+        };
+
+        let mut col = row.col as usize;
+        for (idx, ch) in row.text.char_indices() {
+            let w = ch.width().unwrap_or(1).max(1) as usize;
+            if col + w > click_col as usize {
+                self.cursor = row.byte_offset + idx;
+                return;
+            }
+            col += w;
         }
+        self.cursor = row.byte_offset + row.text.len();
     }
 
     /// Attempt tab completion for slash commands.
@@ -365,7 +496,6 @@ impl Widget for InputBarWidget {
         }
 
         let row = area.y;
-        let _width = area.width as usize;
 
         // Draw top border
         screen.hline(
@@ -380,7 +510,37 @@ impl Widget for InputBarWidget {
         // Draw prompt and input on the next rows
         let input_row = row + 1;
 
-        if self.confirming {
+        if self.streaming {
+            // ── Streaming mode: show spinner + label, block input ──
+            let frame = STREAMING_FRAMES.get(self.streaming_frame).unwrap_or(&"⠋");
+            let label = format!("{} {}…", frame, self.streaming_label);
+            let mut col = area.x;
+            screen.write_str(
+                input_row,
+                col,
+                &label,
+                Color::ORANGE,
+                styles::INPUT_BAR_BG,
+                Style::dim(),
+            );
+            col += label.width() as u16;
+
+            // Fill the rest with background
+            for c in col..area.x + area.width {
+                if let Some(cell) = screen.get_mut(input_row, c) {
+                    cell.bg = styles::INPUT_BAR_BG;
+                }
+            }
+
+            // Fill any additional rows with background
+            for r in (input_row + 1)..area.y + area.height {
+                for c in area.x..area.x + area.width {
+                    if let Some(cell) = screen.get_mut(r, c) {
+                        cell.bg = styles::INPUT_BAR_BG;
+                    }
+                }
+            }
+        } else if self.confirming {
             // In confirmation mode, show a yellow prompt asking for y/n/a
             let confirm_prompt = "[y/n/a]? ";
             let mut col = area.x;
@@ -398,6 +558,7 @@ impl Widget for InputBarWidget {
             if self.focused && col < area.x + area.width {
                 if let Some(cell) = screen.get_mut(input_row, col) {
                     cell.char = '█';
+                    cell.wide = false;
                     cell.fg = Color::YELLOW;
                     cell.style = Style::blink();
                 }
@@ -425,11 +586,20 @@ impl Widget for InputBarWidget {
 
             // Draw input content
             let available_width = area.width.saturating_sub(col - area.x);
-            let display_text = if self.content.len() > available_width as usize {
-                let start = self.content.len().saturating_sub(available_width as usize);
-                &self.content[start..]
+            let (display_text, display_offset) = if self.content.width() > available_width as usize
+            {
+                // Content is wider than available — show the tail, snapping to a
+                // char boundary so multi-byte UTF-8 doesn't panic.
+                let target_bytes = self.content.len().saturating_sub(available_width as usize);
+                let start = self
+                    .content
+                    .char_indices()
+                    .find(|(i, _)| *i >= target_bytes)
+                    .map(|(i, _)| i)
+                    .unwrap_or(target_bytes);
+                (&self.content[start..], start)
             } else {
-                &self.content
+                (self.content.as_str(), 0)
             };
 
             screen.write_str(
@@ -443,7 +613,12 @@ impl Widget for InputBarWidget {
 
             // Draw cursor
             if self.focused {
-                let cursor_col = col + self.cursor.min(display_text.len()) as u16;
+                let adjusted_cursor = self
+                    .cursor
+                    .saturating_sub(display_offset)
+                    .min(display_text.len());
+                let before_cursor = &display_text[..adjusted_cursor];
+                let cursor_col = col + before_cursor.width() as u16;
                 if cursor_col < area.x + area.width {
                     if let Some(cell) = screen.get_mut(input_row, cursor_col) {
                         cell.style.underline = true;
@@ -452,7 +627,6 @@ impl Widget for InputBarWidget {
             }
         } else {
             let prompt = format!("[{}] ", self.mode_label);
-            let _model_suffix = format!(" {}{}", self.model_name, Color::Default.fg_escape());
 
             // Draw mode label
             let mut col = area.x;
@@ -464,67 +638,48 @@ impl Widget for InputBarWidget {
                 styles::INPUT_BAR_BG,
                 Style::bold(),
             );
-            col += prompt.len() as u16;
+            col += prompt.width() as u16;
 
-            // Draw input content (with wrapping if needed)
             let available_width = area.width.saturating_sub(col - area.x);
-            let display_text = if self.content.len() > available_width as usize {
-                // Show the end of the text that fits, scrolled to cursor
-                let start = self.content.len().saturating_sub(available_width as usize);
-                &self.content[start..]
-            } else {
-                &self.content
-            };
 
-            screen.write_str(
+            // Render wrapped content over the available rows.
+            render_wrapped_input(
+                &self.content,
+                self.cursor,
+                self.focused,
+                screen,
                 input_row,
+                area.y + area.height - 1,
+                area.x,
                 col,
-                display_text,
-                Color::WHITE,
-                styles::INPUT_BAR_BG,
-                Style::default(),
+                available_width,
             );
-
-            // Draw cursor (blinking is handled by terminal, we just position it)
-            if self.focused {
-                let cursor_col = col + self.cursor.min(display_text.len()) as u16;
-                if cursor_col < area.x + area.width {
-                    // Underline the character under the cursor
-                    if let Some(cell) = screen.get_mut(input_row, cursor_col) {
-                        cell.style.underline = true;
-                    }
-                }
-            }
-
-            // Fill the rest of the input line with background
-            let text_end = col + display_text.len() as u16;
-            if text_end < area.x + area.width {
-                // Background is already filled by write_str
-            }
-
-            // For multi-line input, render additional lines
-            let lines: Vec<&str> = self.content.lines().collect();
-            for (i, line) in lines.iter().enumerate() {
-                if i == 0 {
-                    continue; // Already rendered the first line
-                }
-                let line_row = input_row + i as u16;
-                if line_row >= area.y + area.height {
-                    break;
-                }
-                screen.write_str(
-                    line_row,
-                    area.x,
-                    line,
-                    Color::WHITE,
-                    styles::INPUT_BAR_BG,
-                    Style::default(),
-                );
-            }
         }
     }
 
     fn handle_event(&mut self, event: &Event) -> Action {
+        // In streaming mode, block all input except Ctrl+C and Ctrl+D
+        if self.streaming {
+            if let Event::Key(key) = event {
+                match key {
+                    KeyEvent {
+                        key: Key::Char('c'),
+                        modifiers,
+                    } if modifiers.ctrl => {
+                        return Action::Interrupt;
+                    }
+                    KeyEvent {
+                        key: Key::Char('d'),
+                        modifiers,
+                    } if modifiers.ctrl => {
+                        return Action::Quit;
+                    }
+                    _ => return Action::None,
+                }
+            }
+            return Action::None;
+        }
+
         // Handle paste events (bracketed paste mode)
         if let Event::Paste(text) = event {
             if !self.confirming && !self.questioning {
@@ -645,6 +800,115 @@ impl Widget for InputBarWidget {
     }
 }
 
+/// Render the normal input text wrapped into the available area.
+/// `first_col` is where the first line starts (after the prompt); subsequent
+/// lines start at `area_x`.
+fn render_wrapped_input(
+    content: &str,
+    cursor: usize,
+    focused: bool,
+    screen: &mut Screen,
+    start_row: u16,
+    max_row: u16,
+    area_x: u16,
+    first_col: u16,
+    available_width: u16,
+) {
+    let prompt_width = first_col.saturating_sub(area_x);
+    let rows = input_rows(content, prompt_width, area_x, available_width);
+
+    if rows.is_empty() {
+        // Empty content: draw the cursor at the prompt end on the first row,
+        // then fill the rest with background. We must start clearing at
+        // first_col (after the prompt) on the first row so we don't
+        // overwrite the prompt label that was already drawn.
+        if focused {
+            if let Some(cell) = screen.get_mut(start_row, first_col) {
+                cell.style.underline = true;
+                cell.bg = styles::INPUT_BAR_BG;
+            }
+        }
+
+        // Fill from first_col on the first row (preserving prompt area),
+        // then from area_x on subsequent rows.
+        let prompt_end = first_col + prompt_width.min(available_width);
+        let content_width = available_width.saturating_sub(prompt_width.min(available_width));
+        for c in prompt_end..prompt_end + content_width {
+            if let Some(cell) = screen.get_mut(start_row, c) {
+                cell.char = ' ';
+                cell.wide = false;
+                cell.fg = Color::Default;
+                cell.bg = styles::INPUT_BAR_BG;
+                cell.style = Style::default();
+            }
+        }
+        for r in (start_row + 1)..=max_row {
+            for c in area_x..area_x + available_width {
+                if let Some(cell) = screen.get_mut(r, c) {
+                    cell.char = ' ';
+                    cell.wide = false;
+                    cell.fg = Color::Default;
+                    cell.bg = styles::INPUT_BAR_BG;
+                    cell.style = Style::default();
+                }
+            }
+        }
+        return;
+    }
+
+    for (i, row) in rows.iter().enumerate() {
+        let screen_row = start_row + i as u16;
+        if screen_row > max_row {
+            break;
+        }
+
+        // Show only the tail of the row if it doesn't fit.
+        let display_text = if row.text.width() > available_width as usize {
+            truncate_str_width(row.text, available_width as usize)
+        } else {
+            row.text
+        };
+
+        screen.write_str(
+            screen_row,
+            row.col,
+            display_text,
+            Color::WHITE,
+            styles::INPUT_BAR_BG,
+            Style::default(),
+        );
+
+        // Cursor on the active row.
+        if focused && cursor >= row.byte_offset && cursor <= row.byte_offset + row.text.len() {
+            let before_cursor_len = cursor.saturating_sub(row.byte_offset).min(row.text.len());
+            let before_cursor = &row.text[..before_cursor_len];
+            let cursor_col = row.col + before_cursor.width() as u16;
+            if cursor_col < area_x + available_width {
+                if let Some(cell) = screen.get_mut(screen_row, cursor_col) {
+                    cell.style.underline = true;
+                    if cell.char == ' ' {
+                        cell.fg = Color::WHITE;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fill remaining lines with background so stale content is cleared.
+    let last_rendered_row = start_row + rows.len() as u16;
+    for r in last_rendered_row..=max_row {
+        for c in area_x..area_x + available_width {
+            if let Some(cell) = screen.get_mut(r, c) {
+                cell.char = ' ';
+                cell.wide = false;
+                cell.fg = Color::Default;
+                cell.bg = styles::INPUT_BAR_BG;
+                cell.style = Style::default();
+            }
+        }
+    }
+}
+
 impl InputBarWidget {
     /// Handle a key event in normal (non-confirmation) mode.
     fn handle_normal_key(&mut self, key: &KeyEvent) -> Action {
@@ -704,27 +968,11 @@ impl InputBarWidget {
                 modifiers,
             } => {
                 if modifiers.ctrl {
-                    // Ctrl+Left: move back one word
-                    if self.cursor > 0 {
-                        let text_before = &self.content[..self.cursor];
-                        let trimmed =
-                            text_before.trim_end_matches(|c: char| c.is_whitespace() && c != '\n');
-                        let word_start = if trimmed.len() < text_before.len() {
-                            trimmed
-                                .rfind(|c: char| c.is_whitespace() || c == '\n')
-                                .map(|p| p + 1)
-                                .unwrap_or(0)
-                        } else {
-                            text_before
-                                .rfind(|c: char| c.is_whitespace() || c == '\n')
-                                .map(|p| p + 1)
-                                .unwrap_or(0)
-                        };
-                        self.cursor = word_start;
-                    }
+                    self.cursor = word_start_backward(&self.content, self.cursor);
                 } else if self.cursor > 0 {
-                    if let Some(ch) = self.content[..self.cursor].chars().next_back() {
-                        self.cursor -= ch.len_utf8();
+                    if let Some((idx, _ch)) = self.content[..self.cursor].char_indices().next_back()
+                    {
+                        self.cursor = idx;
                     }
                 }
                 self.reset_tab_cycle();
@@ -735,23 +983,10 @@ impl InputBarWidget {
                 modifiers,
             } => {
                 if modifiers.ctrl {
-                    // Ctrl+Right: move forward one word
-                    if self.cursor < self.content.len() {
-                        let text_after = &self.content[self.cursor..];
-                        // Skip the current word, then skip trailing whitespace
-                        let word_end = text_after
-                            .find(|c: char| c.is_whitespace() || c == '\n')
-                            .unwrap_or(text_after.len());
-                        let after_word = &text_after[word_end..];
-                        let whitespace_skipped = after_word
-                            .chars()
-                            .take_while(|c| c.is_whitespace() && *c != '\n')
-                            .count();
-                        self.cursor += word_end + whitespace_skipped;
-                    }
+                    self.cursor = word_end_forward(&self.content, self.cursor);
                 } else if self.cursor < self.content.len() {
-                    if let Some(ch) = self.content[self.cursor..].chars().next() {
-                        self.cursor += ch.len_utf8();
+                    if let Some((idx, ch)) = self.content[self.cursor..].char_indices().next() {
+                        self.cursor = idx + ch.len_utf8();
                     }
                 }
                 self.reset_tab_cycle();
@@ -892,23 +1127,7 @@ impl InputBarWidget {
                         'w' => {
                             // Ctrl+W: delete word backward
                             if self.cursor > 0 {
-                                // Find the start of the previous word
-                                let text_before = &self.content[..self.cursor];
-                                let trimmed = text_before
-                                    .trim_end_matches(|c: char| c.is_whitespace() && c != '\n');
-                                let word_start = if trimmed.len() < text_before.len() {
-                                    // There was trailing whitespace — skip it then find the word
-                                    trimmed
-                                        .rfind(|c: char| c.is_whitespace() || c == '\n')
-                                        .map(|p| p + 1)
-                                        .unwrap_or(0)
-                                } else {
-                                    // No trailing whitespace — find the word boundary
-                                    text_before
-                                        .rfind(|c: char| c.is_whitespace() || c == '\n')
-                                        .map(|p| p + 1)
-                                        .unwrap_or(0)
-                                };
+                                let word_start = word_start_backward(&self.content, self.cursor);
                                 let killed = self.content[word_start..self.cursor].to_string();
                                 if !killed.is_empty() {
                                     self.kill_ring = killed;
@@ -935,61 +1154,20 @@ impl InputBarWidget {
                     match c {
                         'b' => {
                             // Alt+B: move cursor back one word
-                            if self.cursor > 0 {
-                                let text_before = &self.content[..self.cursor];
-                                let trimmed = text_before
-                                    .trim_end_matches(|c: char| c.is_whitespace() && c != '\n');
-                                let word_start = if trimmed.len() < text_before.len() {
-                                    trimmed
-                                        .rfind(|c: char| c.is_whitespace() || c == '\n')
-                                        .map(|p| p + 1)
-                                        .unwrap_or(0)
-                                } else {
-                                    text_before
-                                        .rfind(|c: char| c.is_whitespace() || c == '\n')
-                                        .map(|p| p + 1)
-                                        .unwrap_or(0)
-                                };
-                                self.cursor = word_start;
-                            }
+                            self.cursor = word_start_backward(&self.content, self.cursor);
                             self.reset_tab_cycle();
                             Action::None
                         }
                         'f' => {
                             // Alt+F: move cursor forward one word
-                            if self.cursor < self.content.len() {
-                                let text_after = &self.content[self.cursor..];
-                                // Skip the current word, then skip trailing whitespace
-                                let word_end = text_after
-                                    .find(|c: char| c.is_whitespace() || c == '\n')
-                                    .unwrap_or(text_after.len());
-                                let after_word = &text_after[word_end..];
-                                let whitespace_skipped = after_word
-                                    .chars()
-                                    .take_while(|c| c.is_whitespace() && *c != '\n')
-                                    .count();
-                                self.cursor += word_end + whitespace_skipped;
-                            }
+                            self.cursor = word_end_forward(&self.content, self.cursor);
                             self.reset_tab_cycle();
                             Action::None
                         }
                         '\x08' | '\x7f' => {
                             // Alt+Backspace: delete word backward (same as Ctrl+W)
                             if self.cursor > 0 {
-                                let text_before = &self.content[..self.cursor];
-                                let trimmed = text_before
-                                    .trim_end_matches(|c: char| c.is_whitespace() && c != '\n');
-                                let word_start = if trimmed.len() < text_before.len() {
-                                    trimmed
-                                        .rfind(|c: char| c.is_whitespace() || c == '\n')
-                                        .map(|p| p + 1)
-                                        .unwrap_or(0)
-                                } else {
-                                    text_before
-                                        .rfind(|c: char| c.is_whitespace() || c == '\n')
-                                        .map(|p| p + 1)
-                                        .unwrap_or(0)
-                                };
+                                let word_start = word_start_backward(&self.content, self.cursor);
                                 let killed = self.content[word_start..self.cursor].to_string();
                                 if !killed.is_empty() {
                                     self.kill_ring = killed;
@@ -1677,5 +1855,39 @@ mod tests {
         let event = Event::Paste("test".to_string());
         bar.handle_event(&event);
         // Paste is ignored in question mode per our implementation
+    }
+
+    #[test]
+    fn test_question_mode_render_multibyte_no_panic() {
+        // Regression test: non-ASCII content in questioning mode should not
+        // panic when the display is truncated to fit the available width.
+        // The old code used content.len().saturating_sub(available_width) as a
+        // byte offset, which could land mid-character and panic.
+        let mut screen = Screen::new(30, 5);
+        let mut bar = InputBarWidget::new("agent", "test");
+        bar.set_questioning(true, 3);
+        // Fill with CJK characters (3 bytes each, display width 2)
+        bar.content = "你好世界测试".to_string(); // 6 chars, 18 bytes, width 12
+        bar.cursor = bar.content.len();
+
+        let area = Rect::new(0, 0, 30, 5);
+        bar.render(area, &mut screen);
+        // Should not panic — that's the test
+    }
+
+    #[test]
+    fn test_question_mode_render_cursor_position_with_truncation() {
+        // When content is truncated in question mode, the cursor should be
+        // positioned correctly relative to the displayed (truncated) text.
+        let mut screen = Screen::new(20, 5);
+        let mut bar = InputBarWidget::new("agent", "test");
+        bar.set_questioning(true, 3);
+        // Content wider than available width so it gets truncated
+        bar.content = "abcdefghij".to_string(); // 10 chars, width 10
+        bar.cursor = 8; // cursor at 'i'
+
+        let area = Rect::new(0, 0, 20, 5);
+        bar.render(area, &mut screen);
+        // Should not panic and cursor should be visible
     }
 }
