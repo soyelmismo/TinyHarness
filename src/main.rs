@@ -14,7 +14,7 @@ use tinyharness_lib::{
     mode::AgentMode,
     provider::{
         Message, Provider, Role, llama_cpp::LlamaCppProvider, ollama::OllamaProvider,
-        vllm::VllmProvider,
+        sockudo::SockudoProvider, vllm::VllmProvider,
     },
     session::{Session, SessionStore},
     tools::ToolManager,
@@ -35,26 +35,42 @@ use tokio::sync::Mutex;
 #[derive(clap::Parser, Debug)]
 #[command(version, about = "tinyharness - ai coding harness")]
 struct Args {
+    /// Use the Ollama provider (local LLM inference server).
     #[arg(short, long)]
     ollama: bool,
+
+    /// Use the llama.cpp provider (llama-server HTTP API).
     #[arg(short, long)]
     llama_cpp: bool,
+
+    /// Use the vLLM provider (OpenAI-compatible API server).
     #[arg(short, long)]
     vllm: bool,
+
+    /// Use the Sockudo provider (AI Transport via Sockudo WebSocket server).
+    #[arg(long)]
+    sockudo: bool,
+
+    /// Provider server URL (e.g. http://127.0.0.1:11434 for Ollama).
+    /// Overrides the saved setting. Use `-u ""` to reset to the provider default.
     #[arg(short, long, default_value_t = String::new())]
     url: String,
+
     /// Continue the most recent session in the current directory.
     #[arg(short, long)]
     r#continue: bool,
+
     /// Run interactive provider setup: pick a provider, enter a URL, save to
     /// settings. Exits when done.
     #[arg(long)]
     config: bool,
+
     /// Start the conversation with this prompt instead of waiting for input.
     /// Use `-p` for short flags. The agent then drops into the normal
     /// interactive loop for follow-up turns.
     #[arg(short = 'p', long = "prompt")]
     prompt: Option<String>,
+
     /// Launch the terminal UI (TUI) mode with split panes.
     #[arg(long)]
     tui: bool,
@@ -66,6 +82,8 @@ fn resolve_provider_kind(args: &Args, settings: &Settings) -> ProviderKind {
         ProviderKind::LlamaCpp
     } else if args.vllm {
         ProviderKind::Vllm
+    } else if args.sockudo {
+        ProviderKind::Sockudo
     } else if args.ollama {
         ProviderKind::Ollama
     } else {
@@ -88,6 +106,14 @@ async fn create_provider(
             settings.ollama_max_retries,
             settings.ollama_think_type,
         ))),
+        ProviderKind::Sockudo => {
+            let app_id = settings.sockudo_app_id.clone().unwrap_or_default();
+            let app_key = settings.sockudo_app_key.clone().unwrap_or_default();
+            let app_secret = settings.sockudo_app_secret.clone().unwrap_or_default();
+            Arc::new(Mutex::new(SockudoProvider::new(
+                url, app_id, app_key, app_secret,
+            )))
+        }
     };
 
     // Run health check for all providers (Ollama included)
@@ -113,30 +139,21 @@ async fn auto_select_model(provider: &mut dyn Provider, saved_model: Option<&Str
         return;
     }
 
-    let models = provider.list_models().await;
-
+    // If a model was saved from a previous session, trust it directly.
+    // This is important for providers like Sockudo that don't expose a model
+    // list endpoint — the saved model is the worker's backend (e.g. Ollama)
+    // model name, which we can't validate locally.
     if let Some(saved) = saved_model {
-        if models.iter().any(|m| m == saved) {
-            provider.select_model(saved.clone());
-            return;
-        }
-        // Saved model not available — warn and fall through
-        if let Some(first) = models.first() {
-            let mut err_out = Output::stderr();
-            let _ = writeln!(
-                err_out,
-                "{BOLD}Warning:{RESET} Saved model '{saved}' not available. Picked first: {BLUE}{first}{RESET}",
-            );
-            provider.select_model(first.clone());
-        } else {
-            let mut err_out = Output::stderr();
-            let _ = writeln!(
-                err_out,
-                "{BOLD}Error:{RESET} No models available. Use /model <name> to set one manually.",
-            );
-        }
+        let mut err_out = Output::stderr();
+        let _ = writeln!(
+            err_out,
+            "{BOLD}Using saved model:{RESET} {BLUE}{saved}{RESET}",
+        );
+        provider.select_model(saved.clone());
         return;
     }
+
+    let models = provider.list_models().await;
 
     // No saved model — pick first available
     if let Some(first) = models.first() {
@@ -367,7 +384,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Resolve URL: CLI > saved > default. If a provider flag was passed without
     // --url, prompt interactively (requires a TTY) and persist the result.
     let url = if args.url.is_empty() {
-        let cli_provider_flag_set = args.ollama || args.llama_cpp || args.vllm;
+        let cli_provider_flag_set = args.ollama || args.llama_cpp || args.vllm || args.sockudo;
         if cli_provider_flag_set {
             // User explicitly chose a provider without a URL — ask for it
             // interactively so the saved URL stays in sync.
@@ -405,7 +422,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // a provider flag was passed without --url, so we only need to cover
     // the remaining cases here.
     let mut settings = settings;
-    let explicit_provider = args.ollama || args.llama_cpp || args.vllm;
+    let explicit_provider = args.ollama || args.llama_cpp || args.vllm || args.sockudo;
     if explicit_provider && !args.url.is_empty() {
         // User gave both --ollama/--llama-cpp/--vllm and --url. Persist both.
         if settings.last_provider != provider_kind {
