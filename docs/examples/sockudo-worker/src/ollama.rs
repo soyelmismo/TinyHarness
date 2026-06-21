@@ -40,7 +40,6 @@ pub struct OllamaChunkMessage {
     #[allow(dead_code)]
     pub thinking: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub tool_calls: Vec<serde_json::Value>,
 }
 
@@ -69,14 +68,25 @@ pub struct OllamaChatRequest {
 pub struct OllamaChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<serde_json::Value>,
 }
 
 /// Result of a streaming Ollama chat call.
 pub struct StreamResult {
     /// Receiver for content chunks (text deltas).
     pub chunks: mpsc::Receiver<String>,
-    /// Total response text (available after stream completes).
-    pub full_text: tokio::sync::oneshot::Receiver<String>,
+    /// Full response info (available after stream completes).
+    pub full_text: tokio::sync::oneshot::Receiver<OllamaResponse>,
+}
+
+/// Full response from Ollama, available after streaming completes.
+#[derive(Debug, Clone, Default)]
+pub struct OllamaResponse {
+    /// Accumulated text content.
+    pub text: String,
+    /// Tool calls from the final chunk(s) (if any).
+    pub tool_calls: Vec<serde_json::Value>,
 }
 
 /// Stream a chat completion from Ollama.
@@ -105,7 +115,7 @@ pub async fn stream_chat(
     }
 
     let (chunk_tx, chunk_rx) = mpsc::channel::<String>(256);
-    let (full_tx, full_rx) = tokio::sync::oneshot::channel::<String>();
+    let (full_tx, full_rx) = tokio::sync::oneshot::channel::<OllamaResponse>();
 
     // Use bytes_stream() for true streaming — the response body is read
     // incrementally as chunks arrive over the network, not buffered entirely.
@@ -114,6 +124,7 @@ pub async fn stream_chat(
 
     tokio::spawn(async move {
         let mut accumulated = String::new();
+        let mut accumulated_tool_calls: Vec<serde_json::Value> = Vec::new();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -140,9 +151,17 @@ pub async fn stream_chat(
                         accumulated.push_str(&ollama_chunk.message.content);
                         if chunk_tx.send(ollama_chunk.message.content).await.is_err() {
                             // receiver dropped — stop streaming
-                            let _ = full_tx.send(accumulated);
+                            let _ = full_tx.send(OllamaResponse {
+                                text: accumulated,
+                                tool_calls: accumulated_tool_calls,
+                            });
                             return;
                         }
+                    }
+                    // Capture tool calls (Ollama sends them in the final chunk(s))
+                    if !ollama_chunk.message.tool_calls.is_empty() {
+                        accumulated_tool_calls
+                            .extend(ollama_chunk.message.tool_calls.iter().cloned());
                     }
                     if ollama_chunk.done {
                         break;
@@ -155,13 +174,20 @@ pub async fn stream_chat(
         let remaining = buffer.trim();
         if !remaining.is_empty()
             && let Ok(ollama_chunk) = serde_json::from_str::<OllamaChunk>(remaining)
-            && !ollama_chunk.message.content.is_empty()
         {
-            accumulated.push_str(&ollama_chunk.message.content);
-            let _ = chunk_tx.send(ollama_chunk.message.content).await;
+            if !ollama_chunk.message.content.is_empty() {
+                accumulated.push_str(&ollama_chunk.message.content);
+                let _ = chunk_tx.send(ollama_chunk.message.content).await;
+            }
+            if !ollama_chunk.message.tool_calls.is_empty() {
+                accumulated_tool_calls.extend(ollama_chunk.message.tool_calls.iter().cloned());
+            }
         }
 
-        let _ = full_tx.send(accumulated);
+        let _ = full_tx.send(OllamaResponse {
+            text: accumulated,
+            tool_calls: accumulated_tool_calls,
+        });
     });
 
     Ok(StreamResult {
@@ -170,12 +196,12 @@ pub async fn stream_chat(
     })
 }
 
-/// Call Ollama non-streaming and return the full response text.
+/// Call Ollama non-streaming and return the full response (text + tool calls).
 pub async fn chat(
     client: &Client,
     base_url: &str,
     request: &OllamaChatRequest,
-) -> Result<String, String> {
+) -> Result<OllamaResponse, String> {
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
 
     let mut req = serde_json::to_value(request).map_err(|e| format!("serialize: {e}"))?;
@@ -196,10 +222,17 @@ pub async fn chat(
 
     let json: serde_json::Value = response.json().await.map_err(|e| format!("parse: {e}"))?;
 
-    Ok(json["message"]["content"]
+    let text = json["message"]["content"]
         .as_str()
         .unwrap_or("")
-        .to_string())
+        .to_string();
+
+    let tool_calls = json["message"]["tool_calls"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(OllamaResponse { text, tool_calls })
 }
 
 /// Build a default HTTP client with reasonable timeouts.

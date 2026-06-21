@@ -295,9 +295,19 @@ async fn handle_ai_input(
     // Convert messages to Ollama format
     let ollama_messages: Vec<OllamaChatMessage> = messages
         .iter()
-        .map(|m| OllamaChatMessage {
-            role: m["role"].as_str().unwrap_or("user").to_string(),
-            content: m["content"].as_str().unwrap_or("").to_string(),
+        .map(|m| {
+            let role = m["role"].as_str().unwrap_or("user").to_string();
+            let content = m["content"].as_str().unwrap_or("").to_string();
+            let tool_calls = m
+                .get("tool_calls")
+                .and_then(|t| t.as_array())
+                .cloned()
+                .unwrap_or_default();
+            OllamaChatMessage {
+                role,
+                content,
+                tool_calls,
+            }
         })
         .collect();
 
@@ -335,7 +345,7 @@ async fn handle_ai_input(
         let stream_result = stream_chat(http_client, &config.ollama_url, &request).await?;
 
         let mut chunks = stream_result.chunks;
-        let full_text_rx = stream_result.full_text;
+        let full_response_rx = stream_result.full_text;
 
         while let Some(chunk) = chunks.recv().await {
             let append_extras = transport_extras(&message_serial, "streaming");
@@ -351,46 +361,48 @@ async fn handle_ai_input(
             .await;
         }
 
-        // Get the full accumulated text
-        let full_text = full_text_rx.await.unwrap_or_default();
+        // Get the full response (text + tool calls)
+        let response = full_response_rx.await.unwrap_or_default();
 
-        // 3. Publish sockudo:message.update with final content
+        // 3. Publish sockudo:message.update with final content + tool_calls
         let update_extras = transport_extras(&message_serial, "complete");
+        let update_data = build_update_data(&response.text, &response.tool_calls);
         publish_event_with(
             http_client,
             config,
             channel,
             "sockudo:message.update",
-            &full_text,
+            &update_data,
             Some(&update_extras),
             None,
         )
         .await?;
     } else {
         // Non-streaming mode: call Ollama, get full response, publish as append + update
-        let response_text = crate::ollama::chat(http_client, &config.ollama_url, &request).await?;
+        let response = crate::ollama::chat(http_client, &config.ollama_url, &request).await?;
 
-        // Append the full response
+        // Append the full response text
         let append_extras = transport_extras(&message_serial, "streaming");
         publish_event_with(
             http_client,
             config,
             channel,
             "sockudo:message.append",
-            &response_text,
+            &response.text,
             Some(&append_extras),
             None,
         )
         .await?;
 
-        // Update with final status
+        // Update with final status + tool_calls
         let update_extras = transport_extras(&message_serial, "complete");
+        let update_data = build_update_data(&response.text, &response.tool_calls);
         publish_event_with(
             http_client,
             config,
             channel,
             "sockudo:message.update",
-            &response_text,
+            &update_data,
             Some(&update_extras),
             None,
         )
@@ -411,6 +423,23 @@ async fn handle_ai_input(
 
     info!("Completed ai-input on {channel} (model: {model})");
     Ok(())
+}
+
+/// Build the JSON data payload for a `sockudo:message.update` event.
+///
+/// When tool calls are present, includes them in a JSON object alongside
+/// the text content. When there are no tool calls, returns the plain text
+/// content (backwards-compatible with existing clients).
+fn build_update_data(text: &str, tool_calls: &[serde_json::Value]) -> String {
+    if tool_calls.is_empty() {
+        return text.to_string();
+    }
+    serde_json::json!({
+        "content": text,
+        "tool_calls": tool_calls,
+        "is_final": true,
+    })
+    .to_string()
 }
 
 /// Publish a versioned message event to Sockudo via signed HTTP POST.

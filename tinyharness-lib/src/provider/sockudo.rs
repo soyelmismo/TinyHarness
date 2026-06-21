@@ -296,8 +296,7 @@ impl SockudoProvider {
                     // Versioned message mutations
                     if let Some(op) = event.event.strip_prefix("sockudo:message.") {
                         match op {
-                            "create" | "append" | "update" => {
-                                let is_final_op = op == "update";
+                            "create" | "append" => {
                                 if let Ok(vm) =
                                     serde_json::from_str::<VersionedMessage>(&event.data)
                                 {
@@ -307,6 +306,27 @@ impl SockudoProvider {
                                         send_chunk(&send, &chunk_content).await;
                                     }
 
+                                    // Capture tool calls (can appear in any chunk)
+                                    if let Some(tc_json) = &vm.tool_calls
+                                        && let Some(tcs) = parse_tool_calls(tc_json)
+                                    {
+                                        final_tool_calls = tcs;
+                                    }
+                                } else {
+                                    // Plain-text payload (not JSON). Treat as content chunk.
+                                    if !event.data.is_empty() {
+                                        send_chunk(&send, &event.data).await;
+                                    }
+                                }
+                                continue;
+                            }
+                            "update" => {
+                                // The update event is the final marker.
+                                // It may carry tool_calls in JSON format.
+                                // Content is NOT re-sent (already streamed via append).
+                                if let Ok(vm) =
+                                    serde_json::from_str::<VersionedMessage>(&event.data)
+                                {
                                     // Capture tool calls
                                     if let Some(tc_json) = &vm.tool_calls
                                         && let Some(tcs) = parse_tool_calls(tc_json)
@@ -314,28 +334,19 @@ impl SockudoProvider {
                                         final_tool_calls = tcs;
                                     }
 
-                                    if vm.is_final == Some(true) || is_final_op {
-                                        let usage = vm.usage.as_ref().map(|u| TokenUsage {
-                                            prompt_tokens: u.prompt_tokens,
-                                            completion_tokens: u.completion_tokens,
-                                            total_tokens: u.total_tokens,
-                                        });
-                                        send_done(&send, &final_tool_calls, usage).await;
-                                        done_sent = true;
-                                        break;
-                                    }
+                                    let usage = vm.usage.as_ref().map(|u| TokenUsage {
+                                        prompt_tokens: u.prompt_tokens,
+                                        completion_tokens: u.completion_tokens,
+                                        total_tokens: u.total_tokens,
+                                    });
+                                    send_done(&send, &final_tool_calls, usage).await;
+                                    done_sent = true;
+                                    break;
                                 } else {
-                                    // Plain-text payload (not JSON). Treat event.data
-                                    // as the content chunk. Skip "update" to avoid
-                                    // duplicating already-streamed append content.
-                                    if !is_final_op && !event.data.is_empty() {
-                                        send_chunk(&send, &event.data).await;
-                                    }
-                                    if is_final_op {
-                                        send_done(&send, &final_tool_calls, None).await;
-                                        done_sent = true;
-                                        break;
-                                    }
+                                    // Plain-text update — just signal done.
+                                    send_done(&send, &final_tool_calls, None).await;
+                                    done_sent = true;
+                                    break;
                                 }
                             }
                             "delete" => {
@@ -562,6 +573,7 @@ struct VersionedMessage {
     serial: Option<String>,
     /// Whether this is the final message in the stream.
     #[serde(default, rename = "is_final")]
+    #[allow(dead_code)]
     is_final: Option<bool>,
     /// Tool calls from the AI (when the model wants to call tools).
     #[serde(default)]
