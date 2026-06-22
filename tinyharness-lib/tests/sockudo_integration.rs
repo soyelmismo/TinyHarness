@@ -258,19 +258,19 @@ async fn test_chat_returns_receiver() {
 
 #[tokio::test]
 #[ignore = "requires live Sockudo server"]
-async fn test_chat_without_model_fails() {
+async fn test_chat_without_model_succeeds() {
     require_sockudo!();
 
     let mut provider = make_provider();
-    // Don't select a model
+    // Don't select a model — the worker should use its default
 
     let messages = vec![Message::simple(Role::User, "hello")];
     let result = provider.chat(messages, vec![]).await;
 
-    assert!(result.is_err(), "chat() without a model should return Err");
     assert!(
-        result.unwrap_err().contains("No model selected"),
-        "error message should mention model selection"
+        result.is_ok(),
+        "chat() without a model should succeed (worker uses default): {:?}",
+        result.err()
     );
 }
 
@@ -581,6 +581,10 @@ async fn run_agent_worker(
                     // Publish response back as versioned messages
                     let message_serial = format!("msg-{}", uuid::Uuid::new_v4());
                     let message_id = format!("mid-{}", uuid::Uuid::new_v4());
+                    let model = input
+                        .get("model")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or(TEST_MODEL);
 
                     // 1. Create message
                     let create_extras = serde_json::json!({
@@ -588,7 +592,8 @@ async fn run_agent_worker(
                             "transport": {
                                 "codec-message-id": &message_serial,
                                 "stream": "true",
-                                "status": "streaming"
+                                "status": "streaming",
+                                "model": model
                             }
                         }
                     });
@@ -611,7 +616,8 @@ async fn run_agent_worker(
                             "transport": {
                                 "codec-message-id": &message_serial,
                                 "stream": "true",
-                                "status": "streaming"
+                                "status": "streaming",
+                                "model": model
                             }
                         }
                     });
@@ -634,7 +640,8 @@ async fn run_agent_worker(
                             "transport": {
                                 "codec-message-id": &message_serial,
                                 "stream": "true",
-                                "status": "complete"
+                                "status": "complete",
+                                "model": model
                             }
                         }
                     });

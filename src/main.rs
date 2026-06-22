@@ -140,9 +140,8 @@ async fn auto_select_model(provider: &mut dyn Provider, saved_model: Option<&Str
     }
 
     // If a model was saved from a previous session, trust it directly.
-    // This is important for providers like Sockudo that don't expose a model
-    // list endpoint — the saved model is the worker's backend (e.g. Ollama)
-    // model name, which we can't validate locally.
+    // This is important for providers that don't expose a model list
+    // endpoint — the saved model name can't be validated locally.
     if let Some(saved) = saved_model {
         let mut err_out = Output::stderr();
         let _ = writeln!(
@@ -224,7 +223,7 @@ async fn run_tui_mode(
 
     let model_name = {
         let p = provider.lock().await;
-        p.current_model().unwrap_or_else(|| "unknown".to_string())
+        p.current_model().unwrap_or_default()
     };
     let mode_str = ctx.current_mode.to_string();
 
@@ -409,10 +408,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let provider = create_provider(provider_kind, url.clone(), &settings).await;
 
-    // Auto-select model if none is currently set
+    // Auto-select model if none is currently set.
+    // Sockudo doesn't use a saved model — the worker selects the backend
+    // model, and the actual model name is reported back via WebSocket
+    // extras during streaming. Using a saved model from a different
+    // provider (e.g. Ollama) would be incorrect.
     {
         let mut p = provider.lock().await;
-        auto_select_model(&mut *p, settings.last_model.as_ref()).await;
+        if provider_kind == ProviderKind::Sockudo {
+            // For Sockudo, the model is determined by the worker. If the
+            // user has already selected one via /model, keep it; otherwise
+            // the worker's default will be used and the name will be
+            // discovered from the first response.
+            if p.current_model().is_none() {
+                let mut err_out = Output::stderr();
+                let _ = writeln!(
+                    err_out,
+                    "{BOLD}Sockudo:{RESET} No model selected. The worker will use its default model. Use {CYAN}/model <name>{RESET} to set one manually.",
+                );
+            }
+        } else {
+            auto_select_model(&mut *p, settings.last_model.as_ref()).await;
+        }
     }
 
     // Save the provider kind + URL now that we know which one is active.

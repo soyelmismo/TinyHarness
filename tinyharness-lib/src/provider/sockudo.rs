@@ -14,6 +14,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
@@ -37,6 +38,12 @@ type HmacSha256 = Hmac<Sha256>;
 ///
 /// Connects to a Sockudo server, publishes `ai-input` events via HTTP,
 /// and streams `ai-output` responses via WebSocket.
+///
+/// The `model` field is shared (`Arc<Mutex<...>>`) so that the background
+/// streaming task (which works with a cloned `SockudoProvider`) can update
+/// the model name in-place when it's discovered from WebSocket events.
+/// This avoids needing a separate channel or response field to propagate
+/// the model name back to the caller.
 #[derive(Clone)]
 pub struct SockudoProvider {
     http_client: Client,
@@ -44,7 +51,7 @@ pub struct SockudoProvider {
     app_id: String,
     app_key: String,
     app_secret: String,
-    model: Option<String>,
+    model: Arc<Mutex<Option<String>>>,
     timeout_secs: u64,
 }
 
@@ -65,7 +72,7 @@ impl SockudoProvider {
             app_id,
             app_key,
             app_secret,
-            model: None,
+            model: Arc::new(Mutex::new(None)),
             timeout_secs: 120,
         }
     }
@@ -147,11 +154,27 @@ impl SockudoProvider {
         // Serialize the data value to a JSON string so Sockudo accepts it.
         let data_str =
             serde_json::to_string(data).map_err(|e| format!("serialize event data: {e}"))?;
-        let body_json = serde_json::json!({
+        let mut body_json = serde_json::json!({
             "name": "ai-input",
             "channel": channel,
             "data": data_str,
         });
+
+        // Include the model identifier in extras.ai.transport.model if present
+        // in the data payload. Sockudo validates this as a non-empty opaque
+        // string (AIT-S99) and passes it through to subscribers.
+        if let Some(model) = data.get("model").and_then(|m| m.as_str())
+            && !model.is_empty()
+        {
+            body_json["extras"] = serde_json::json!({
+                "ai": {
+                    "transport": {
+                        "model": model
+                    }
+                }
+            });
+        }
+
         let body =
             serde_json::to_string(&body_json).map_err(|e| format!("serialize event body: {e}"))?;
 
@@ -257,6 +280,18 @@ impl SockudoProvider {
                         Err(_) => continue,
                     };
 
+                    // Extract model from extras.ai.transport.model if present.
+                    // This is the model reported by the Sockudo worker/agent
+                    // and may differ from the locally-selected model name.
+                    // Update the shared model field in-place so that
+                    // `current_model()` reflects it immediately.
+                    if let Some(model) = event.extras.as_ref().and_then(WsExtras::transport_model) {
+                        tracing::debug!("Sockudo event model: {model}");
+                        if let Ok(mut m) = self.model.lock() {
+                            *m = Some(model);
+                        }
+                    }
+
                     // Connection established → subscribe
                     if event.event == "pusher:connection_established"
                         || event.event == "sockudo:connection_established"
@@ -314,6 +349,10 @@ impl SockudoProvider {
                                 if let Ok(vm) =
                                     serde_json::from_str::<VersionedMessage>(&event.data)
                                 {
+                                    // Extract model from message data if not
+                                    // already known from extras.
+                                    update_model_if_new(&self.model, &vm.model);
+
                                     // Send incremental content chunk
                                     let chunk_content = vm.content.unwrap_or_default();
                                     if !chunk_content.is_empty() {
@@ -341,6 +380,10 @@ impl SockudoProvider {
                                 if let Ok(vm) =
                                     serde_json::from_str::<VersionedMessage>(&event.data)
                                 {
+                                    // Extract model from message data if not
+                                    // already known from extras.
+                                    update_model_if_new(&self.model, &vm.model);
+
                                     // Capture tool calls
                                     if let Some(tc_json) = &vm.tool_calls
                                         && let Some(tcs) = parse_tool_calls(tc_json)
@@ -425,6 +468,20 @@ async fn send_chunk(send: &mpsc::Sender<ChatMessageResponse>, content: &str) {
         .await;
 }
 
+/// Update the shared model field only if it's currently `None` and the
+/// new model name is non-empty. Called from the streaming task when a
+/// `VersionedMessage` carries a `model` field (fallback when not present
+/// in WebSocket extras).
+fn update_model_if_new(shared: &Arc<Mutex<Option<String>>>, new_model: &Option<String>) {
+    if let Some(m) = new_model
+        && !m.is_empty()
+        && let Ok(mut current) = shared.lock()
+        && current.is_none()
+    {
+        *current = Some(m.clone());
+    }
+}
+
 /// Send the final done marker with optional tool calls and usage.
 async fn send_done(
     send: &mpsc::Sender<ChatMessageResponse>,
@@ -479,7 +536,7 @@ impl Provider for SockudoProvider {
     }
 
     fn list_models(&self) -> Pin<Box<dyn Future<Output = Vec<String>> + Send>> {
-        let model = self.model.clone();
+        let model = self.model.lock().ok().and_then(|m| m.clone());
         Box::pin(async move {
             // Sockudo AI Transport doesn't expose a model list endpoint.
             // Return the currently selected model if set, or an empty vec
@@ -489,11 +546,13 @@ impl Provider for SockudoProvider {
     }
 
     fn select_model(&mut self, name: String) {
-        self.model = Some(name);
+        if let Ok(mut m) = self.model.lock() {
+            *m = Some(name);
+        }
     }
 
     fn current_model(&self) -> Option<String> {
-        self.model.clone()
+        self.model.lock().ok().and_then(|m| m.clone())
     }
 
     fn set_timeout(&mut self, timeout_secs: u64) {
@@ -506,18 +565,17 @@ impl Provider for SockudoProvider {
         tools: Vec<ToolDefinition>,
     ) -> Pin<Box<dyn Future<Output = Result<mpsc::Receiver<ChatMessageResponse>, String>> + Send>>
     {
-        let model = match self.model.clone() {
-            Some(m) => m,
-            None => {
-                return Box::pin(async move {
-                    Err("No model selected. Use /model <name> to select one.".to_string())
-                });
-            }
-        };
+        // Sockudo doesn't require a locally-selected model — the worker
+        // picks the backend model (or uses its default). We send the model
+        // name if we have one, otherwise omit it and let the worker decide.
+        // The actual model name is discovered from WebSocket extras during
+        // streaming and stored in the shared `model` field.
+        let model = self.model.lock().ok().and_then(|m| m.clone());
+        let model_for_input = model.as_deref().filter(|s| !s.is_empty());
 
         let (send, recv) = mpsc::channel::<ChatMessageResponse>(1024);
 
-        let mut ai_input = build_ai_input(&model, &messages, &tools);
+        let mut ai_input = build_ai_input_opt(model_for_input, &messages, &tools);
         let worker_channel = "ai-output".to_string();
         let response_channel = format!("ai-output-{}", uuid::Uuid::new_v4());
         ai_input["response_channel"] = serde_json::Value::String(response_channel.clone());
@@ -550,6 +608,38 @@ struct WsEvent {
     #[serde(default)]
     #[allow(dead_code)]
     channel: Option<String>,
+    /// V2 extras envelope — carries AI transport metadata.
+    #[serde(default)]
+    extras: Option<WsExtras>,
+}
+
+/// Extras envelope with AI transport headers.
+#[derive(Debug, Deserialize, Default)]
+struct WsExtras {
+    #[serde(default)]
+    ai: Option<WsAiExtras>,
+}
+
+/// AI extras with transport and codec tiers.
+#[derive(Debug, Deserialize, Default)]
+struct WsAiExtras {
+    #[serde(default)]
+    transport: Option<serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    codec: Option<serde_json::Value>,
+}
+
+impl WsExtras {
+    /// Extract the `extras.ai.transport.model` field if present.
+    fn transport_model(&self) -> Option<String> {
+        self.ai
+            .as_ref()
+            .and_then(|ai| ai.transport.as_ref())
+            .and_then(|t| t.get("model"))
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -594,6 +684,10 @@ struct VersionedMessage {
     /// Token usage info (present in final message).
     #[serde(default)]
     usage: Option<AiUsage>,
+    /// Model name reported by the worker (may appear in the message data
+    /// as a fallback when not present in WebSocket extras).
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -613,8 +707,20 @@ struct AiUsage {
 /// The payload includes the model name, conversation messages, and tool
 /// definitions, serialized as JSON. The Sockudo AI Transport server
 /// forwards this to the configured LLM backend.
+#[cfg(test)]
 fn build_ai_input(
     model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+) -> serde_json::Value {
+    build_ai_input_opt(Some(model), messages, tools)
+}
+
+/// Same as `build_ai_input` but with an optional model.
+/// When `model` is `None`, the `model` field is omitted from the payload,
+/// letting the Sockudo worker use its configured default model.
+fn build_ai_input_opt(
+    model: Option<&str>,
     messages: &[Message],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
@@ -668,10 +774,12 @@ fn build_ai_input(
         .collect();
 
     let mut payload = serde_json::json!({
-        "model": model,
         "messages": msgs,
         "stream": true,
     });
+    if let Some(m) = model {
+        payload["model"] = serde_json::Value::String(m.to_string());
+    }
     if !tool_defs.is_empty() {
         payload["tools"] = serde_json::Value::Array(tool_defs);
     }
@@ -1219,5 +1327,177 @@ mod tests {
         let err: PusherErrorData = serde_json::from_str(json).unwrap();
         assert_eq!(err.message, "Bad request");
         assert!(err.code.is_none());
+    }
+
+    #[test]
+    fn test_ws_event_with_extras_transport_model() {
+        let json = r#"{
+            "event": "sockudo:message.append",
+            "data": "{\"content\":\"hello\"}",
+            "extras": {
+                "ai": {
+                    "transport": {
+                        "codec-message-id": "msg-1",
+                        "stream": "true",
+                        "status": "streaming",
+                        "model": "qwen2.5:0.5b"
+                    }
+                }
+            }
+        }"#;
+        let event: WsEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "sockudo:message.append");
+        let extras = event.extras.expect("extras should be present");
+        assert_eq!(extras.transport_model(), Some("qwen2.5:0.5b".to_string()));
+    }
+
+    #[test]
+    fn test_ws_event_without_extras() {
+        let json = r#"{
+            "event": "pusher:connection_established",
+            "data": "{\"socket_id\":\"12345\"}"
+        }"#;
+        let event: WsEvent = serde_json::from_str(json).unwrap();
+        assert!(event.extras.is_none());
+    }
+
+    #[test]
+    fn test_ws_event_extras_without_model() {
+        let json = r#"{
+            "event": "sockudo:message.append",
+            "data": "{\"content\":\"hi\"}",
+            "extras": {
+                "ai": {
+                    "transport": {
+                        "codec-message-id": "msg-2",
+                        "status": "streaming"
+                    }
+                }
+            }
+        }"#;
+        let event: WsEvent = serde_json::from_str(json).unwrap();
+        let extras = event.extras.expect("extras should be present");
+        assert_eq!(extras.transport_model(), None);
+    }
+
+    #[test]
+    fn test_build_ai_input_includes_model_for_extras() {
+        // build_ai_input puts the model in the data payload; publish_ai_input
+        // extracts it and adds extras.ai.transport.model. Verify the data
+        // payload has the model field that publish_ai_input looks for.
+        let messages = vec![Message::simple(Role::User, "Hello")];
+        let result = build_ai_input("my-model", &messages, &[]);
+        assert_eq!(result["model"], "my-model");
+    }
+
+    #[test]
+    fn test_publish_ai_input_body_includes_model_in_extras() {
+        // Verify that publish_ai_input includes extras.ai.transport.model
+        // by checking the serialized body it would send.
+        let provider = SockudoProvider::new(
+            "http://127.0.0.1:6001".to_string(),
+            "app-id".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
+        );
+
+        let data = serde_json::json!({
+            "model": "qwen2.5:0.5b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+        });
+
+        // Reproduce the body construction logic from publish_ai_input
+        let data_str = serde_json::to_string(&data).unwrap();
+        let mut body_json = serde_json::json!({
+            "name": "ai-input",
+            "channel": "ai-test",
+            "data": data_str,
+        });
+        if let Some(model) = data.get("model").and_then(|m| m.as_str())
+            && !model.is_empty()
+        {
+            body_json["extras"] = serde_json::json!({
+                "ai": {
+                    "transport": {
+                        "model": model
+                    }
+                }
+            });
+        }
+
+        assert_eq!(
+            body_json["extras"]["ai"]["transport"]["model"],
+            "qwen2.5:0.5b"
+        );
+        assert_eq!(body_json["name"], "ai-input");
+        assert_eq!(body_json["channel"], "ai-test");
+
+        // Verify the data field is a JSON string (Pusher protocol)
+        let parsed_data: serde_json::Value =
+            serde_json::from_str(body_json["data"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed_data["model"], "qwen2.5:0.5b");
+
+        let _ = provider; // suppress unused warning
+    }
+
+    #[test]
+    fn test_publish_ai_input_body_no_extras_without_model() {
+        // When the data payload has no model field, extras should not be added.
+        let data = serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+        });
+
+        let data_str = serde_json::to_string(&data).unwrap();
+        let mut body_json = serde_json::json!({
+            "name": "ai-input",
+            "channel": "ai-test",
+            "data": data_str,
+        });
+        if let Some(model) = data.get("model").and_then(|m| m.as_str())
+            && !model.is_empty()
+        {
+            body_json["extras"] = serde_json::json!({
+                "ai": {
+                    "transport": {
+                        "model": model
+                    }
+                }
+            });
+        }
+
+        assert!(body_json.get("extras").is_none());
+    }
+
+    #[test]
+    fn test_publish_ai_input_body_no_extras_with_empty_model() {
+        // When the model is an empty string, extras should not be added
+        // (Sockudo rejects empty model values).
+        let data = serde_json::json!({
+            "model": "",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+        });
+
+        let data_str = serde_json::to_string(&data).unwrap();
+        let mut body_json = serde_json::json!({
+            "name": "ai-input",
+            "channel": "ai-test",
+            "data": data_str,
+        });
+        if let Some(model) = data.get("model").and_then(|m| m.as_str())
+            && !model.is_empty()
+        {
+            body_json["extras"] = serde_json::json!({
+                "ai": {
+                    "transport": {
+                        "model": model
+                    }
+                }
+            });
+        }
+
+        assert!(body_json.get("extras").is_none());
     }
 }

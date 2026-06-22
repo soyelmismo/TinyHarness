@@ -249,13 +249,14 @@ impl SockudoWorker {
 }
 
 /// Build the AI transport extras JSON for versioned message events.
-fn transport_extras(message_serial: &str, status: &str) -> serde_json::Value {
+fn transport_extras(message_serial: &str, status: &str, model: &str) -> serde_json::Value {
     serde_json::json!({
         "ai": {
             "transport": {
                 "codec-message-id": message_serial,
                 "stream": "true",
-                "status": status
+                "status": status,
+                "model": model
             }
         }
     })
@@ -327,7 +328,7 @@ async fn handle_ai_input(
     let message_id = format!("mid-{}", uuid::Uuid::new_v4());
 
     // 1. Publish sockudo:message.create (empty data, streaming status)
-    let create_extras = transport_extras(&message_serial, "streaming");
+    let create_extras = transport_extras(&message_serial, "streaming", &model);
     publish_event_with(
         http_client,
         config,
@@ -348,7 +349,7 @@ async fn handle_ai_input(
         let full_response_rx = stream_result.full_text;
 
         while let Some(chunk) = chunks.recv().await {
-            let append_extras = transport_extras(&message_serial, "streaming");
+            let append_extras = transport_extras(&message_serial, "streaming", &model);
             let _ = publish_event_with(
                 http_client,
                 config,
@@ -365,7 +366,7 @@ async fn handle_ai_input(
         let response = full_response_rx.await.unwrap_or_default();
 
         // 3. Publish sockudo:message.update with final content + tool_calls
-        let update_extras = transport_extras(&message_serial, "complete");
+        let update_extras = transport_extras(&message_serial, "complete", &model);
         let update_data = build_update_data(&response.text, &response.tool_calls);
         publish_event_with(
             http_client,
@@ -382,7 +383,7 @@ async fn handle_ai_input(
         let response = crate::ollama::chat(http_client, &config.ollama_url, &request).await?;
 
         // Append the full response text
-        let append_extras = transport_extras(&message_serial, "streaming");
+        let append_extras = transport_extras(&message_serial, "streaming", &model);
         publish_event_with(
             http_client,
             config,
@@ -395,7 +396,7 @@ async fn handle_ai_input(
         .await?;
 
         // Update with final status + tool_calls
-        let update_extras = transport_extras(&message_serial, "complete");
+        let update_extras = transport_extras(&message_serial, "complete", &model);
         let update_data = build_update_data(&response.text, &response.tool_calls);
         publish_event_with(
             http_client,
@@ -533,16 +534,18 @@ mod tests {
 
     #[test]
     fn test_transport_extras_streaming() {
-        let extras = transport_extras("msg-123", "streaming");
+        let extras = transport_extras("msg-123", "streaming", "test-model");
         assert_eq!(extras["ai"]["transport"]["codec-message-id"], "msg-123");
         assert_eq!(extras["ai"]["transport"]["stream"], "true");
         assert_eq!(extras["ai"]["transport"]["status"], "streaming");
+        assert_eq!(extras["ai"]["transport"]["model"], "test-model");
     }
 
     #[test]
     fn test_transport_extras_complete() {
-        let extras = transport_extras("msg-abc", "complete");
+        let extras = transport_extras("msg-abc", "complete", "test-model");
         assert_eq!(extras["ai"]["transport"]["codec-message-id"], "msg-abc");
         assert_eq!(extras["ai"]["transport"]["status"], "complete");
+        assert_eq!(extras["ai"]["transport"]["model"], "test-model");
     }
 }
