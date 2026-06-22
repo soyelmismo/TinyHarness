@@ -8,6 +8,9 @@
 port = 6001
 host = "0.0.0.0"
 debug = true
+# Default is 64 (64KB). AI Transport events with large conversation histories
+# + tool definitions can exceed this, so raise to match [event_limits].
+websocket_max_payload_kb = 10240
 
 [app_manager]
 driver = "memory"
@@ -25,6 +28,10 @@ enabled = true
 [app_manager.array.apps.policy.limits]
 max_connections = 100
 max_client_events_per_second = 1000
+# Per-app event payload limit (in KB). Default is 100 (100KB) which is too
+# small for AI Transport events with large conversation histories + tool
+# definitions. Raise to match the server-level [event_limits] below.
+max_event_payload_in_kb = 10240
 
 [app_manager.array.apps.policy.features]
 enable_client_messages = true
@@ -37,6 +44,15 @@ driver = "memory"
 
 [queue]
 driver = "memory"
+
+# ── Event Limits ────────────────────────────────────────────────────────────
+# Default max_payload_in_kb is 100 (100KB). AI input events with large
+# conversation histories + tool definitions can exceed this, so raise it.
+[event_limits]
+max_channels_at_once = 100
+max_name_length = 200
+max_payload_in_kb = 10240
+max_batch_size = 10
 
 [rate_limiter]
 enabled = false

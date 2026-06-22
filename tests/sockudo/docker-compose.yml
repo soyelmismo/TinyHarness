@@ -28,6 +28,11 @@ services:
       SOCKUDO_DEFAULT_APP_SECRET: "test-secret"
       SOCKUDO_DEFAULT_APP_ENABLED: "true"
       SOCKUDO_ENABLE_CLIENT_MESSAGES: "true"
+      # Per-app event payload limit (KB). Default is 100 which rejects large
+      # AI Transport events. Must match config.toml's [event_limits].
+      SOCKUDO_DEFAULT_APP_MAX_EVENT_PAYLOAD_IN_KB: "10240"
+      # WebSocket payload limit (KB). Default is 64 which can also block large messages.
+      WEBSOCKET_MAX_PAYLOAD_KB: "10240"
     ports:
       - "6001:6001"
       - "9601:9601"

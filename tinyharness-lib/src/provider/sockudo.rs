@@ -185,21 +185,27 @@ impl SockudoProvider {
         Ok(())
     }
 
-    /// Subscribe to a channel via WebSocket and stream `ai-output` events
+    /// Subscribe to a channel via WebSocket, publish the `ai-input` event
+    /// after subscription is confirmed, then stream `ai-output` events
     /// as `ChatMessageResponse` chunks.
     ///
     /// The flow is:
     /// 1. Connect to `ws://host:port/app/{appKey}?protocol=2`
     /// 2. Receive `pusher:connection_established` → extract `socket_id`
     /// 3. Send `pusher:subscribe` for the AI output channel
-    /// 4. Listen for versioned message events (`sockudo:message.create`,
+    /// 4. Wait for `subscription_succeeded` — **then** publish `ai-input`
+    ///    via HTTP POST (this prevents a race where the worker emits
+    ///    response events before we are listening)
+    /// 5. Listen for versioned message events (`sockudo:message.create`,
     ///    `sockudo:message.append`, `sockudo:message.update`) and convert
     ///    them to streaming response chunks
-    /// 5. When `sockudo:message.update` with the final content arrives, or
+    /// 6. When `sockudo:message.update` with the final content arrives, or
     ///    `ai-turn-end` is received, send the done marker
     async fn subscribe_and_stream(
         &self,
         channel: &str,
+        worker_channel: &str,
+        ai_input: &serde_json::Value,
         send: mpsc::Sender<ChatMessageResponse>,
     ) -> Result<(), String> {
         let ws_url = self.ws_url();
@@ -272,6 +278,14 @@ impl SockudoProvider {
                         || event.event == "sockudo:subscription_succeeded"
                     {
                         subscribed = true;
+
+                        // Now that we are subscribed, publish the ai-input
+                        // event. This prevents a race condition where the
+                        // worker emits response events before we are listening.
+                        if let Err(e) = self.publish_ai_input(worker_channel, ai_input).await {
+                            send_error(&send, &format!("Error publishing ai-input: {e}")).await;
+                            return Err(format!("publish ai-input: {e}"));
+                        }
                         continue;
                     }
 
@@ -512,14 +526,13 @@ impl Provider for SockudoProvider {
         let provider = self.clone();
 
         tokio::spawn(async move {
-            // 1. Publish ai-input event to the worker's fixed channel
-            if let Err(e) = provider.publish_ai_input(&worker_channel, &ai_input).await {
-                send_error(&send, &format!("Error publishing ai-input: {e}")).await;
-                return;
-            }
-
-            // 2. Subscribe to the response channel via WebSocket
-            if let Err(e) = provider.subscribe_and_stream(&response_channel, send).await {
+            // Subscribe to the response channel via WebSocket and publish
+            // ai-input only after subscription is confirmed (prevents race
+            // condition where worker emits events before we are listening).
+            if let Err(e) = provider
+                .subscribe_and_stream(&response_channel, &worker_channel, &ai_input, send)
+                .await
+            {
                 tracing::warn!("Sockudo stream ended with error: {e}");
             }
         });
@@ -622,8 +635,11 @@ fn build_ai_input(
                 obj["tool_calls"] = serde_json::json!(
                     m.tool_calls
                         .iter()
-                        .map(|tc| {
+                        .enumerate()
+                        .map(|(i, tc)| {
                             serde_json::json!({
+                                "id": format!("call-{}", i),
+                                "type": "function",
                                 "function": {
                                     "name": tc.function.name,
                                     "arguments": tc.function.arguments,
@@ -1155,6 +1171,11 @@ mod tests {
         assert_eq!(result["messages"].as_array().unwrap().len(), 3);
         assert_eq!(result["messages"][1]["role"], "assistant");
         assert!(result["messages"][1]["tool_calls"].is_array());
+        // Tool calls must include id and type fields for OpenAI-compatible backends
+        let tc = &result["messages"][1]["tool_calls"][0];
+        assert_eq!(tc["type"], "function");
+        assert!(tc["id"].as_str().unwrap().starts_with("call-"));
+        assert_eq!(tc["function"]["name"], "ls");
         assert_eq!(result["messages"][2]["role"], "tool");
     }
 
