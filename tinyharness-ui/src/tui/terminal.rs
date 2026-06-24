@@ -1,10 +1,100 @@
 // ── Terminal control primitives ─────────────────────────────────────────────
 //
 // Raw mode, alternate screen buffer, cursor control, and terminal size
-// detection — all using raw ANSI sequences and POSIX termios.
+// detection — all using raw ANSI sequences and platform-specific APIs.
 // No external TUI framework dependency.
 
 use std::io::{self, Write};
+
+// ── Windows Console API FFI ─────────────────────────────────────────────────
+
+#[cfg(windows)]
+mod winapi {
+    use std::ffi::c_void;
+    use std::io;
+
+    pub type Bool = i32;
+    pub type DWORD = u32;
+    pub type HANDLE = *mut c_void;
+
+    pub const STD_INPUT_HANDLE: DWORD = 0xFFFFFFF6; // (DWORD)-10
+    pub const STD_OUTPUT_HANDLE: DWORD = 0xFFFFFFF5; // (DWORD)-11
+
+    pub const ENABLE_ECHO_INPUT: DWORD = 0x0004;
+    pub const ENABLE_LINE_INPUT: DWORD = 0x0002;
+    pub const ENABLE_PROCESSED_INPUT: DWORD = 0x0001;
+    pub const ENABLE_VIRTUAL_TERMINAL_INPUT: DWORD = 0x0200;
+    pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
+
+    #[allow(non_snake_case)]
+    #[repr(C)]
+    pub struct CONSOLE_SCREEN_BUFFER_INFO {
+        pub dwSize: COORD,
+        pub dwCursorPosition: COORD,
+        pub wAttributes: u16,
+        pub srWindow: SMALL_RECT,
+        pub dwMaximumWindowSize: COORD,
+    }
+
+    #[allow(non_snake_case)]
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct COORD {
+        pub X: i16,
+        pub Y: i16,
+    }
+
+    #[allow(non_snake_case)]
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct SMALL_RECT {
+        pub Left: i16,
+        pub Top: i16,
+        pub Right: i16,
+        pub Bottom: i16,
+    }
+
+    unsafe extern "system" {
+        pub fn GetStdHandle(nStdHandle: DWORD) -> HANDLE;
+        pub fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *mut DWORD) -> Bool;
+        pub fn SetConsoleMode(hConsoleHandle: HANDLE, dwMode: DWORD) -> Bool;
+        pub fn GetConsoleScreenBufferInfo(
+            hConsoleOutput: HANDLE,
+            lpConsoleScreenBufferInfo: *mut CONSOLE_SCREEN_BUFFER_INFO,
+        ) -> Bool;
+    }
+
+    /// Get the console mode for the given standard handle.
+    pub fn get_console_mode(handle: HANDLE) -> io::Result<DWORD> {
+        let mut mode: DWORD = 0;
+        unsafe {
+            if GetConsoleMode(handle, &mut mode) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(mode)
+    }
+
+    /// Set the console mode for the given standard handle.
+    pub fn set_console_mode(handle: HANDLE, mode: DWORD) -> io::Result<()> {
+        unsafe {
+            if SetConsoleMode(handle, mode) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the stdin handle.
+    pub fn stdin_handle() -> HANDLE {
+        unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+    }
+
+    /// Get the stdout handle.
+    pub fn stdout_handle() -> HANDLE {
+        unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+    }
+}
 
 // ── Terminal size ────────────────────────────────────────────────────────────
 
@@ -20,7 +110,9 @@ impl Size {
         Self { cols, rows }
     }
 
-    /// Get the terminal size from the TIOCGWINSZ ioctl (Unix).
+    /// Get the terminal size from the OS.
+    ///
+    /// On Unix, uses TIOCGWINSZ ioctl. On Windows, uses the Console API.
     #[cfg(unix)]
     pub fn from_terminal() -> io::Result<Self> {
         // Safety: TIOCGWINSZ is a read-only ioctl that doesn't modify memory.
@@ -46,6 +138,35 @@ impl Size {
         })
     }
 
+    /// Get the terminal size from the Windows Console API.
+    #[cfg(windows)]
+    pub fn from_terminal() -> io::Result<Self> {
+        use self::winapi::*;
+        let handle = stdout_handle();
+        if handle.is_null() {
+            return Err(io::Error::new(io::ErrorKind::Other, "GetStdHandle failed"));
+        }
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
+        unsafe {
+            if GetConsoleScreenBufferInfo(handle, &mut info) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(Size {
+            cols: (info.srWindow.Right - info.srWindow.Left + 1) as u16,
+            rows: (info.srWindow.Bottom - info.srWindow.Top + 1) as u16,
+        })
+    }
+
+    /// Fallback for platforms without a native terminal size API.
+    #[cfg(not(any(unix, windows)))]
+    pub fn from_terminal() -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "terminal size detection not supported on this platform",
+        ))
+    }
+
     /// Fallback: use environment variables COLUMNS and LINES.
     pub fn from_env() -> Option<Self> {
         let cols = std::env::var("COLUMNS")
@@ -65,10 +186,16 @@ impl Size {
 
 // ── Raw mode control ────────────────────────────────────────────────────────
 
-/// Saved terminal state for restoration on exit.
+/// Saved terminal state for restoration on exit (Unix).
 #[cfg(unix)]
 struct SavedTermios {
     original: libc::termios,
+}
+
+/// Saved console mode for restoration on exit (Windows).
+#[cfg(windows)]
+struct SavedConsoleMode {
+    stdin_mode: u32,
 }
 
 /// Manages raw terminal mode and alternate screen buffer.
@@ -85,6 +212,8 @@ pub struct Terminal<W: Write> {
     size: Size,
     #[cfg(unix)]
     saved_termios: Option<SavedTermios>,
+    #[cfg(windows)]
+    saved_console_mode: Option<SavedConsoleMode>,
     in_raw_mode: bool,
     in_alternate_screen: bool,
     cursor_hidden: bool,
@@ -102,6 +231,8 @@ impl<W: Write> Terminal<W> {
             size,
             #[cfg(unix)]
             saved_termios: None,
+            #[cfg(windows)]
+            saved_console_mode: None,
             in_raw_mode: false,
             in_alternate_screen: false,
             cursor_hidden: false,
@@ -167,7 +298,7 @@ impl<W: Write> Terminal<W> {
         Ok(())
     }
 
-    /// Restore the terminal to its original settings.
+    /// Restore the terminal to its original settings (Unix).
     #[cfg(unix)]
     pub fn leave_raw_mode(&mut self) -> io::Result<()> {
         if !self.in_raw_mode {
@@ -183,6 +314,84 @@ impl<W: Write> Terminal<W> {
         }
 
         self.in_raw_mode = false;
+        Ok(())
+    }
+
+    /// Switch the terminal to raw mode on Windows.
+    ///
+    /// Disables line input and echo on the console input handle, and
+    /// enables virtual terminal processing on the output handle so that
+    /// ANSI escape sequences are interpreted by the console.
+    #[cfg(windows)]
+    pub fn enter_raw_mode(&mut self) -> io::Result<()> {
+        if self.in_raw_mode {
+            return Ok(());
+        }
+
+        use self::winapi::*;
+
+        let stdin = stdin_handle();
+        if stdin.is_null() {
+            return Err(io::Error::new(io::ErrorKind::Other, "GetStdHandle failed"));
+        }
+
+        // Save original stdin mode
+        let original_mode = winapi::get_console_mode(stdin)?;
+        self.saved_console_mode = Some(SavedConsoleMode {
+            stdin_mode: original_mode,
+        });
+
+        // Disable echo and line input; enable virtual terminal input
+        let new_mode =
+            original_mode & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+        let new_mode = new_mode | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        winapi::set_console_mode(stdin, new_mode)?;
+
+        // Also enable VT processing on stdout so ANSI escape sequences work
+        let stdout = stdout_handle();
+        if !stdout.is_null() {
+            if let Ok(out_mode) = winapi::get_console_mode(stdout) {
+                let _ =
+                    winapi::set_console_mode(stdout, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+
+        self.in_raw_mode = true;
+        Ok(())
+    }
+
+    /// Restore the terminal to its original settings (Windows).
+    #[cfg(windows)]
+    pub fn leave_raw_mode(&mut self) -> io::Result<()> {
+        if !self.in_raw_mode {
+            return Ok(());
+        }
+
+        use self::winapi::*;
+
+        if let Some(saved) = &self.saved_console_mode {
+            let stdin = stdin_handle();
+            if !stdin.is_null() {
+                let _ = winapi::set_console_mode(stdin, saved.stdin_mode);
+            }
+        }
+
+        self.in_raw_mode = false;
+        Ok(())
+    }
+
+    /// Raw mode is not supported on other platforms.
+    #[cfg(not(any(unix, windows)))]
+    pub fn enter_raw_mode(&mut self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "raw mode not supported on this platform",
+        ))
+    }
+
+    /// No-op restore on platforms without raw mode support.
+    #[cfg(not(any(unix, windows)))]
+    pub fn leave_raw_mode(&mut self) -> io::Result<()> {
         Ok(())
     }
 
@@ -346,10 +555,7 @@ impl<W: Write> Drop for Terminal<W> {
         let _ = self.disable_bracketed_paste();
         let _ = self.show_cursor();
         let _ = self.leave_alternate_screen();
-        #[cfg(unix)]
-        {
-            let _ = self.leave_raw_mode();
-        }
+        let _ = self.leave_raw_mode();
     }
 }
 

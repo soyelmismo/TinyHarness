@@ -14,7 +14,7 @@ use super::cell::{Cell, Style};
 use super::event::{Event, EventParser, Key, KeyEvent, MouseButton, MouseEvent};
 use super::layout::{Constraint, Direction, Layout, Rect};
 use super::screen::Screen;
-use super::terminal::{Size, Terminal};
+use super::terminal::Terminal;
 use super::widget::{Action, Widget};
 use super::widgets::conversation::{ContextWarningLevel, ConversationLine, ConversationWidget};
 use super::widgets::input_bar::InputBarWidget;
@@ -1573,6 +1573,7 @@ pub fn spawn_stdin_reader() -> (mpsc::Sender<Event>, mpsc::Receiver<Event>) {
     std::thread::spawn(move || {
         #[cfg(unix)]
         {
+            use super::terminal::Size;
             use std::sync::atomic::{AtomicBool, Ordering as SignalOrdering};
 
             let resize_flag = std::sync::Arc::new(AtomicBool::new(false));
