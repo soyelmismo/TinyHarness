@@ -800,6 +800,7 @@ fn parse_tool_calls(value: &serde_json::Value) -> Option<Vec<ToolCall>> {
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             Some(ToolCall {
+                id: None,
                 function: ToolCallFunction {
                     name,
                     arguments,
@@ -1264,6 +1265,7 @@ mod tests {
     fn test_build_ai_input_with_tool_call_messages() {
         let mut msg = Message::simple(Role::Assistant, "I'll list files.");
         msg.tool_calls = vec![ToolCall {
+            id: None,
             function: ToolCallFunction {
                 name: "ls".to_string(),
                 arguments: serde_json::json!({"path": "/"}),
