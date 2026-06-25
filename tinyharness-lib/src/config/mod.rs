@@ -737,7 +737,7 @@ mod tests {
     fn load_settings_missing_fields_uses_defaults() {
         let json = r#"{
             "last_provider": "OpenAiCompat",
-            "last_provider_url": "http://lampara:8787/v1",
+            "last_provider_url": "http://localhost:8080/v1",
             "last_model": "MiniMax-M3",
             "preferred_mode": "Agent",
             "ollama_api_key": null,
